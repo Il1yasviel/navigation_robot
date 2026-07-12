@@ -49,6 +49,11 @@ HANDSHAKE_RETRY_S = 0.3
 HANDSHAKE_TIMEOUT_S = 2.5
 RESET_WINDOW_S = 5.0
 RESET_MARKER = b"ESP-ROM:"
+OPEN_TIMEOUT_S = 3.0
+STARTUP_PURGE_MAX_S = 1.5
+STARTUP_PURGE_QUIET_READS = 3
+POLL_EVENT_LIMIT = 32
+POLL_TIME_BUDGET_S = 0.008
 
 STATUS_TEXT = {
     0: "成功",
@@ -225,12 +230,15 @@ def open_ftdi_serial(port: str, serial_factory=None):
 class SerialWorker:
     def __init__(self, port: str,
                  session_id: int,
-                 events: queue.Queue[tuple[int, str, object]]) -> None:
+                 events: queue.Queue[tuple[int, str, object]],
+                 serial_factory=None) -> None:
+        self.port = port
         self.session_id = session_id
         self.events = events
         self.tx: queue.Queue[bytes] = queue.Queue()
         self.stop_event = threading.Event()
-        self.connection = open_ftdi_serial(port)
+        self.serial_factory = serial_factory
+        self.connection = None
         self.thread = threading.Thread(target=self._run, name="motor-host-uart", daemon=True)
         self.thread.start()
 
@@ -238,8 +246,33 @@ class SerialWorker:
         if not self.stop_event.is_set():
             self.tx.put(data)
 
+    def _emit(self, kind: str, value: object) -> None:
+        self.events.put((self.session_id, kind, value))
+
+    def _purge_startup_backlog(self) -> None:
+        assert self.connection is not None
+        deadline = time.monotonic() + STARTUP_PURGE_MAX_S
+        quiet_reads = 0
+        while (
+            not self.stop_event.is_set()
+            and time.monotonic() < deadline
+            and quiet_reads < STARTUP_PURGE_QUIET_READS
+        ):
+            self.connection.reset_input_buffer()
+            discarded = self.connection.read(256)
+            if discarded:
+                quiet_reads = 0
+            else:
+                quiet_reads += 1
+        self.connection.reset_input_buffer()
+
     def _run(self) -> None:
         try:
+            self.connection = open_ftdi_serial(self.port, self.serial_factory)
+            self._purge_startup_backlog()
+            if self.stop_event.is_set():
+                return
+            self._emit("opened", self.port)
             while not self.stop_event.is_set():
                 while True:
                     try:
@@ -247,23 +280,34 @@ class SerialWorker:
                     except queue.Empty:
                         break
                     self.connection.write(data)
-                    self.events.put((self.session_id, "tx", data))
+                    self._emit("tx", data)
                 received = self.connection.read(256)
                 if received:
-                    self.events.put((self.session_id, "rx", received))
+                    self._emit("rx", received)
         except Exception as exc:  # Serial failures must reach the Tk thread.
-            self.events.put((self.session_id, "error", str(exc)))
+            self._emit("error", str(exc))
         finally:
             try:
-                self.connection.close()
+                if self.connection is not None and self.connection.is_open:
+                    self.connection.close()
             finally:
-                self.events.put((self.session_id, "closed", None))
+                self._emit("closed", None)
 
     def close(self) -> None:
         self.stop_event.set()
-        self.thread.join(timeout=0.5)
+        if self.connection is None:
+            return
+        cancel_read = getattr(self.connection, "cancel_read", None)
+        if callable(cancel_read):
+            try:
+                cancel_read()
+            except Exception:
+                pass
         if self.connection.is_open:
-            self.connection.close()
+            try:
+                self.connection.close()
+            except Exception:
+                pass
 
 
 class VirtualJoystick(tk.Canvas):
@@ -324,6 +368,7 @@ class MotorTestApp:
         self.disconnect_pending = False
         self.handshake = HandshakeController()
         self.handshake_job: str | None = None
+        self.open_timeout_job: str | None = None
         self.reset_detector = ResetDetector()
 
         self.port_var = tk.StringVar()
@@ -424,12 +469,8 @@ class MotorTestApp:
             if not self.port_var.get():
                 messagebox.showwarning("串口", "未找到可用串口")
                 return
-            try:
-                self.session_id += 1
-                self.worker = SerialWorker(self.port_var.get(), self.session_id, self.events)
-            except Exception as exc:
-                messagebox.showerror("连接失败", str(exc))
-                return
+            self.session_id += 1
+            self.worker = SerialWorker(self.port_var.get(), self.session_id, self.events)
             self.parser = FrameParser()
             self.reset_detector = ResetDetector()
             self.link_ready = False
@@ -437,12 +478,28 @@ class MotorTestApp:
             self.hello_sequence = None
             self.hello_frame = None
             self._set_controls_enabled(False)
-            self.connection_var.set(f"串口已打开，等待ESP32启动 {self.port_var.get()}")
+            self.connection_var.set(f"正在打开串口 {self.port_var.get()}")
             self.connect_button.configure(text="断开")
-            self.handshake.start(time.monotonic())
-            self._schedule_handshake_tick()
+            self._schedule_open_timeout()
         else:
             self._schedule_disconnect()
+
+    def _schedule_open_timeout(self) -> None:
+        if self.open_timeout_job is None:
+            self.open_timeout_job = self.root.after(
+                int(OPEN_TIMEOUT_S * 1000), self._handle_open_timeout)
+
+    def _cancel_open_timeout(self) -> None:
+        if self.open_timeout_job is not None:
+            self.root.after_cancel(self.open_timeout_job)
+            self.open_timeout_job = None
+
+    def _handle_open_timeout(self) -> None:
+        self.open_timeout_job = None
+        if self.worker is None or self.link_ready:
+            return
+        messagebox.showerror("连接超时", f"串口 {self.port_var.get()} 打开或初始化超时")
+        self._finish_disconnect("连接超时")
 
     def _schedule_handshake_tick(self) -> None:
         if self.handshake_job is None:
@@ -496,6 +553,7 @@ class MotorTestApp:
         if worker is not None:
             worker.close()
         self.handshake.complete()
+        self._cancel_open_timeout()
         if self.handshake_job is not None:
             self.root.after_cancel(self.handshake_job)
             self.handshake_job = None
@@ -587,21 +645,23 @@ class MotorTestApp:
         self.root.after(50, self._control_tick)
 
     def _poll(self) -> None:
-        while True:
+        deadline = time.monotonic() + POLL_TIME_BUDGET_S
+        handled = 0
+        while handled < POLL_EVENT_LIMIT and time.monotonic() < deadline:
             try:
                 session_id, kind, value = self.events.get_nowait()
             except queue.Empty:
                 break
+            handled += 1
             if session_id != self.session_id:
                 continue
-            if kind == "rx":
-                data = bytes(value)
-                self._log("RX", data)
-                reset_count = self.reset_detector.feed(data)
-                if reset_count:
-                    self._restart_handshake_after_reset(reset_count)
-                for frame in self.parser.feed(data):
-                    self._handle_frame(frame)
+            if kind == "opened":
+                self._cancel_open_timeout()
+                self.connection_var.set(f"串口已打开，等待ESP32启动 {value}")
+                self.handshake.start(time.monotonic())
+                self._schedule_handshake_tick()
+            elif kind == "rx":
+                self._process_rx(bytes(value))
             elif kind == "tx":
                 self._log("TX", bytes(value))
             elif kind == "error":
@@ -609,6 +669,20 @@ class MotorTestApp:
             elif kind == "closed" and not self.disconnect_pending and self.worker is not None:
                 self._finish_disconnect()
         self.root.after(20, self._poll)
+
+    def _process_rx(self, data: bytes) -> None:
+        self._log("RX", data)
+        reset_count = self.reset_detector.feed(data)
+        if reset_count:
+            self._restart_handshake_after_reset(reset_count)
+        latest_heartbeat = None
+        for frame in self.parser.feed(data):
+            if frame.msg_type == MSG_HEARTBEAT and len(frame.payload) == 30:
+                latest_heartbeat = frame
+            else:
+                self._handle_frame(frame)
+        if latest_heartbeat is not None:
+            self._handle_frame(latest_heartbeat)
 
     def _handle_frame(self, frame: HostFrame) -> None:
         if frame.msg_type == MSG_ACK and len(frame.payload) == 4:
@@ -667,8 +741,9 @@ class MotorTestApp:
         timestamp = time.strftime("%H:%M:%S")
         self.log.insert("end", f"{timestamp} {direction} {data.hex(' ').upper()}\n")
         self.log.see("end")
-        if int(self.log.index("end-1c").split(".")[0]) > 500:
-            self.log.delete("1.0", "100.0")
+        line_count = int(self.log.index("end-1c").split(".")[0])
+        if line_count > 500:
+            self.log.delete("1.0", f"{line_count - 400}.0")
         self.log.configure(state="disabled")
 
     def close(self) -> None:
@@ -679,6 +754,7 @@ class MotorTestApp:
             self.root.destroy()
 
     def _close_now(self) -> None:
+        self._cancel_open_timeout()
         if self.worker is not None:
             self.worker.close()
             self.worker = None

@@ -1,9 +1,12 @@
 import unittest
+import queue
+import time
 
 from motor_test_gui import (
     FrameParser,
     HandshakeController,
     ResetDetector,
+    SerialWorker,
     crc16_ccitt_false,
     encode_frame,
     open_ftdi_serial,
@@ -152,6 +155,119 @@ class SerialOpenTests(unittest.TestCase):
         self.assertLess(names.index("dtr"), names.index("open"))
         self.assertLess(names.index("rts"), names.index("open"))
         self.assertLess(names.index("port"), names.index("open"))
+
+    def test_worker_open_is_async(self):
+        events = queue.Queue()
+
+        class SlowSerial:
+            def __init__(self, **_kwargs):
+                self.is_open = False
+
+            @property
+            def dtr(self):
+                return False
+
+            @dtr.setter
+            def dtr(self, _value):
+                pass
+
+            @property
+            def rts(self):
+                return False
+
+            @rts.setter
+            def rts(self, _value):
+                pass
+
+            @property
+            def port(self):
+                return None
+
+            @port.setter
+            def port(self, _value):
+                pass
+
+            def open(self):
+                time.sleep(0.2)
+                self.is_open = True
+
+            def reset_input_buffer(self):
+                pass
+
+            def read(self, _size):
+                time.sleep(0.01)
+                return b""
+
+            def close(self):
+                self.is_open = False
+
+        start = time.monotonic()
+        worker = SerialWorker("COM9", 7, events, serial_factory=SlowSerial)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 0.1)
+        session_id, kind, value = events.get(timeout=1.0)
+        self.assertEqual((session_id, kind, value), (7, "opened", "COM9"))
+        worker.close()
+        worker.thread.join(timeout=1.0)
+        self.assertFalse(worker.thread.is_alive())
+
+    def test_worker_purges_startup_backlog_before_opened(self):
+        events = queue.Queue()
+
+        class BacklogSerial:
+            def __init__(self, **_kwargs):
+                self.is_open = False
+                self.reads = [b"old-1", b"old-2", b""]
+
+            @property
+            def dtr(self):
+                return False
+
+            @dtr.setter
+            def dtr(self, _value):
+                pass
+
+            @property
+            def rts(self):
+                return False
+
+            @rts.setter
+            def rts(self, _value):
+                pass
+
+            @property
+            def port(self):
+                return None
+
+            @port.setter
+            def port(self, _value):
+                pass
+
+            def open(self):
+                self.is_open = True
+
+            def reset_input_buffer(self):
+                pass
+
+            def read(self, _size):
+                if self.reads:
+                    return self.reads.pop(0)
+                time.sleep(0.01)
+                return b""
+
+            def close(self):
+                self.is_open = False
+
+        worker = SerialWorker("COM9", 9, events, serial_factory=BacklogSerial)
+        self.assertEqual(events.get(timeout=1.0), (9, "opened", "COM9"))
+        with self.assertRaises(queue.Empty):
+            while True:
+                item = events.get_nowait()
+                if item[1] == "rx":
+                    self.fail("startup backlog should not be emitted as rx events")
+        worker.close()
+        worker.thread.join(timeout=1.0)
+        self.assertFalse(worker.thread.is_alive())
 
 
 if __name__ == "__main__":
