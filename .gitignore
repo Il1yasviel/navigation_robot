@@ -1,0 +1,10 @@
+/build/
+/build-native/
+/build-final/
+/build-minimal/
+/build-verify/
+/sdkconfig
+/sdkconfig.old
+__pycache__/
+*.py[cod]
+.vscode/

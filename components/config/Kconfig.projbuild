@@ -1,0 +1,58 @@
+menu "Navigation robot configuration"
+
+config ROBOT_HOST_UART_NUM
+    int "FTDI host UART number"
+    default 0
+    range 0 2
+
+config ROBOT_HOST_UART_TX_GPIO
+    int "FTDI host UART TX GPIO"
+    default 43
+
+config ROBOT_HOST_UART_RX_GPIO
+    int "FTDI host UART RX GPIO"
+    default 44
+
+config ROBOT_MOTOR_UART_NUM
+    int "M0601 RS485 UART number"
+    default 1
+    range 0 2
+
+config ROBOT_RS485_TX_GPIO
+    int "RS485 TX/DI GPIO"
+    default 17
+
+config ROBOT_RS485_RX_GPIO
+    int "RS485 RX/RO GPIO"
+    default 18
+
+config ROBOT_RS485_RTS_GPIO
+    int "RS485 RTS/DE GPIO"
+    default 16
+
+config ROBOT_DEFAULT_MOTOR_ID
+    int "Fallback M0601 motor ID"
+    default 1
+    range 0 255
+
+config ROBOT_TEST_MAX_RPM
+    int "Single-wheel test speed limit (RPM)"
+    default 60
+    range 1 330
+
+config ROBOT_CONTROL_WATCHDOG_MS
+    int "Host control watchdog (ms)"
+    default 300
+    range 100 5000
+
+config ROBOT_TELEMETRY_PERIOD_MS
+    int "Heartbeat period (ms)"
+    default 100
+    range 20 5000
+
+config ROBOT_MOTOR_TIMEOUT_MS
+    int "M0601 transaction timeout (ms)"
+    default 80
+    range 10 1000
+
+endmenu

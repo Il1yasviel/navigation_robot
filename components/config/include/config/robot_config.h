@@ -1,0 +1,21 @@
+#ifndef ROBOT_CONFIG_H
+#define ROBOT_CONFIG_H
+
+#include "sdkconfig.h"
+
+#if CONFIG_ROBOT_HOST_UART_NUM == CONFIG_ROBOT_MOTOR_UART_NUM
+#error "Host UART and motor RS485 UART must use different controllers"
+#endif
+
+#define ROBOT_MOTOR_BAUDRATE       115200
+#define ROBOT_HOST_BAUDRATE        115200
+#define ROBOT_HOST_RX_BUFFER_SIZE  1024
+#define ROBOT_HOST_TX_BUFFER_SIZE  1024
+#define ROBOT_MOTOR_QUEUE_LENGTH   12
+#define ROBOT_MOTOR_QUERY_MS       100
+#define ROBOT_STATIONARY_RPM       3
+#define ROBOT_STATIONARY_SAMPLES   3
+#define ROBOT_ULTRASONIC_TRIG_GPIO 5
+#define ROBOT_ULTRASONIC_ECHO_GPIO 6
+
+#endif
