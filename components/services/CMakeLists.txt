@@ -4,5 +4,5 @@ idf_component_register(
         "src/host_link_service.c"
         "src/safety_service.c"
     INCLUDE_DIRS "include"
-    REQUIRES common config esp32_drivers protocols algorithms freertos esp_timer
+    REQUIRES common config esp32_drivers protocols algorithms bmi088 freertos esp_timer
 )

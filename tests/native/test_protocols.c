@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "protocols/host_frame.h"
+#include "protocols/host_messages.h"
 #include "protocols/m0601c111_motor.h"
 
 static unsigned callback_count;
@@ -64,6 +65,19 @@ static void test_host_protocol(void)
     encoded[length - 1] ^= 0xFF;
     host_stream_parser_feed(&parser, encoded, length, capture_frame, NULL);
     assert(parser.crc_errors == 1);
+
+    static const uint8_t expected_dual[] = {
+        0xAA, 0x55, 0x01, 0x1A, 0x01, 0x01, 0x08, 0x00,
+        0x01, 0x02, 0x19, 0x00, 0x19, 0x00, 0x00, 0x00, 0xD2, 0x49,
+    };
+    const uint8_t dual_payload[] = {1, 2, 25, 0, 25, 0, 0, 0};
+    const size_t dual_length = host_frame_encode(
+        HOST_MSG_SET_DUAL_RPM, 1, HOST_FLAG_ACK_REQUIRED,
+        dual_payload, sizeof(dual_payload), encoded, sizeof(encoded));
+    assert(dual_length == sizeof(expected_dual));
+    assert(memcmp(encoded, expected_dual, sizeof(expected_dual)) == 0);
+    assert(HOST_CHASSIS_TELEMETRY_SIZE == 56u);
+    assert(HOST_IMU_TELEMETRY_SIZE == 44u);
 }
 
 static void test_m0601_protocol(void)

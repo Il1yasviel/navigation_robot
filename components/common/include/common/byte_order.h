@@ -2,6 +2,7 @@
 #define ROBOT_COMMON_BYTE_ORDER_H
 
 #include <stdint.h>
+#include <string.h>
 
 static inline uint16_t robot_read_u16_le(const uint8_t *src)
 {
@@ -38,6 +39,19 @@ static inline void robot_write_u32_le(uint8_t *dst, uint32_t value)
     dst[1] = (uint8_t)((value >> 8) & 0xFFu);
     dst[2] = (uint8_t)((value >> 16) & 0xFFu);
     dst[3] = (uint8_t)(value >> 24);
+}
+
+static inline void robot_write_u64_le(uint8_t *dst, uint64_t value)
+{
+    robot_write_u32_le(dst, (uint32_t)value);
+    robot_write_u32_le(dst + 4, (uint32_t)(value >> 32));
+}
+
+static inline void robot_write_f32_le(uint8_t *dst, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    robot_write_u32_le(dst, bits);
 }
 
 #endif

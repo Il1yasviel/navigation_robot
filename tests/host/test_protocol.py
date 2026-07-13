@@ -1,5 +1,6 @@
 import unittest
 import queue
+import socket
 import time
 from pathlib import Path
 
@@ -10,15 +11,19 @@ from motor_test_gui import (
     MotionCommandGate,
     ResetDetector,
     SerialWorker,
+    TcpWorker,
     TelemetryRateMeter,
     control_state_flags,
     crc16_ccitt_false,
     current_ma_to_raw,
     current_raw_to_ma,
     degrees_to_position_raw,
+    differential_rpm,
     encode_frame,
+    keyboard_direction_rpm,
     open_ftdi_serial,
     position_raw_to_degrees,
+    SPEED_GEARS,
 )
 
 
@@ -42,6 +47,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(
             encode_frame(0x19, 0x2A, 0, bytes((1,))),
             bytes.fromhex("AA 55 01 19 2A 00 01 00 01 C2 72"),
+        )
+
+    def test_dual_motor_golden_frames(self):
+        self.assertEqual(
+            encode_frame(0x1A, 1, 1, bytes.fromhex("01 02 19 00 19 00 00 00")),
+            bytes.fromhex(
+                "AA 55 01 1A 01 01 08 00 01 02 19 00 19 00 00 00 D2 49"),
+        )
+        self.assertEqual(
+            encode_frame(0x1B, 2, 0, bytes.fromhex("01 02")),
+            bytes.fromhex("AA 55 01 1B 02 00 02 00 01 02 E2 7F"),
+        )
+        self.assertEqual(
+            encode_frame(0x1C, 3, 1, bytes.fromhex("01 02 FF")),
+            bytes.fromhex("AA 55 01 1C 03 01 03 00 01 02 FF 00 E3"),
         )
 
     def test_maximum_payload(self):
@@ -137,6 +157,20 @@ class MotorControlUiTests(unittest.TestCase):
         source = Path(__file__).parents[2].joinpath("motor_test_gui.py").read_text(
             encoding="utf-8")
         self.assertNotIn("温度", source)
+        self.assertNotIn("temperature", source.lower())
+
+    def test_five_speed_gears_and_keyboard_directions(self):
+        self.assertEqual(SPEED_GEARS, (25, 50, 75, 100, 125))
+        self.assertEqual(keyboard_direction_rpm("Up", 25), (25, 25))
+        self.assertEqual(keyboard_direction_rpm("Down", 50), (-50, -50))
+        self.assertEqual(keyboard_direction_rpm("Left", 75), (-75, 75))
+        self.assertEqual(keyboard_direction_rpm("Right", 125), (125, -125))
+
+    def test_joystick_differential_mapping_and_limit(self):
+        self.assertEqual(differential_rpm(0, 1000, 125), (125, 125))
+        self.assertEqual(differential_rpm(-1000, 0, 125), (-125, 125))
+        self.assertEqual(differential_rpm(1000, 0, 125), (125, -125))
+        self.assertEqual(differential_rpm(1000, 1000, 200), (125, 0))
 
     def test_unchanged_motion_sends_once_then_ten_keepalives(self):
         gate = MotionCommandGate()
@@ -168,8 +202,8 @@ class MotorControlUiTests(unittest.TestCase):
         gate = MotionCommandGate()
         command = self._motion(30)
         gate.mark_sent(1, command, 0.0)
-        self.assertFalse(gate.check_timeout(0.149))
-        self.assertTrue(gate.check_timeout(0.151))
+        self.assertFalse(gate.check_timeout(0.249))
+        self.assertTrue(gate.check_timeout(0.251))
         self.assertIsNone(gate.offer(command))
         gate.resume()
         self.assertEqual(gate.offer(command), command)
@@ -219,7 +253,25 @@ class FirmwareSourceTests(unittest.TestCase):
         self.assertIn("HOST_MSG_CONTROL_KEEPALIVE 0x19u", messages)
         self.assertIn("case HOST_MSG_CONTROL_KEEPALIVE:", service)
         self.assertIn("frame->flags & HOST_FLAG_ACK_REQUIRED", service)
-        self.assertIn("host_status != HOST_STATUS_OK", service)
+        self.assertIn("status != HOST_STATUS_OK", service)
+
+    def test_dual_protocol_wifi_and_imu_are_wired(self):
+        messages = self.root.joinpath(
+            "components/protocols/include/protocols/host_messages.h").read_text(
+                encoding="utf-8")
+        host = self.root.joinpath(
+            "components/services/src/host_link_service.c").read_text(encoding="utf-8")
+        motor = self.root.joinpath(
+            "components/services/src/motor_service.c").read_text(encoding="utf-8")
+        self.assertIn("HOST_MSG_SET_DUAL_RPM       0x1Au", messages)
+        self.assertIn("HOST_MSG_CHASSIS_TELEMETRY 0x92u", messages)
+        self.assertIn("HOST_MSG_IMU_TELEMETRY     0x93u", messages)
+        self.assertIn("esp32_wifi_tcp_start", host)
+        self.assertIn("bmi088_service_get_snapshot", host)
+        self.assertIn("request->right_target_value * ROBOT_RIGHT_DIRECTION", motor)
+        config = self.root.joinpath(
+            "components/config/Kconfig.projbuild").read_text(encoding="utf-8")
+        self.assertIn('default 125', config)
 
     def test_motor_queries_use_fixed_deadlines(self):
         source = self.root.joinpath(
@@ -413,6 +465,55 @@ class SerialOpenTests(unittest.TestCase):
                 item = events.get_nowait()
                 if item[1] == "rx":
                     self.fail("startup backlog should not be emitted as rx events")
+        worker.close()
+        worker.thread.join(timeout=1.0)
+        self.assertFalse(worker.thread.is_alive())
+
+
+class TcpWorkerTests(unittest.TestCase):
+    def test_tcp_open_send_and_close_are_async(self):
+        events = queue.Queue()
+
+        class FakeSocket:
+            def __init__(self):
+                self.closed = False
+                self.sent = []
+
+            def settimeout(self, _timeout):
+                pass
+
+            def sendall(self, data):
+                self.sent.append(data)
+
+            def recv(self, _size):
+                if self.closed:
+                    return b""
+                time.sleep(0.01)
+                raise socket.timeout
+
+            def shutdown(self, _how):
+                self.closed = True
+
+            def close(self):
+                self.closed = True
+
+        fake = FakeSocket()
+
+        def factory(address, timeout):
+            self.assertEqual(address, ("robot.local", 3333))
+            self.assertEqual(timeout, 2.0)
+            return fake
+
+        start = time.monotonic()
+        worker = TcpWorker("robot.local", 3333, 11, events, socket_factory=factory)
+        self.assertLess(time.monotonic() - start, 0.1)
+        self.assertEqual(events.get(timeout=1.0),
+                         (11, "opened", "robot.local:3333"))
+        worker.send(b"frame")
+        deadline = time.monotonic() + 1.0
+        while not fake.sent and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(fake.sent, [b"frame"])
         worker.close()
         worker.thread.join(timeout=1.0)
         self.assertFalse(worker.thread.is_alive())

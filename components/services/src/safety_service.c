@@ -11,17 +11,23 @@ static void safety_task(void *argument)
 {
     (void)argument;
     for (;;) {
-        motor_snapshot_t snapshot;
-        motor_service_get_snapshot(&snapshot);
+        motor_chassis_snapshot_t snapshot;
+        motor_service_get_chassis_snapshot(&snapshot);
         const uint32_t age = esp32_time_millis() - snapshot.last_control_ms;
         const bool watchdog_expired = age >= CONFIG_ROBOT_CONTROL_WATCHDOG_MS;
-        if (snapshot.control_active &&
-            (watchdog_expired || snapshot.fault != 0u)) {
-            const motor_request_t stop = {
-                .action = MOTOR_ACTION_STOP,
-                .id = snapshot.motor_id,
-                .brake = M0601_BRAKE_ON,
-            };
+        const bool wheel_fault =
+            snapshot.wheel[MOTOR_LEFT_INDEX].fault != 0u ||
+            snapshot.wheel[MOTOR_RIGHT_INDEX].fault != 0u;
+        if (snapshot.control_active && (watchdog_expired || wheel_fault)) {
+            motor_request_t stop = {.brake = M0601_BRAKE_ON};
+            if (snapshot.dual_control_active) {
+                stop.action = MOTOR_ACTION_STOP_DUAL;
+                stop.id = snapshot.wheel[MOTOR_LEFT_INDEX].motor_id;
+                stop.right_id = snapshot.wheel[MOTOR_RIGHT_INDEX].motor_id;
+            } else {
+                stop.action = MOTOR_ACTION_STOP;
+                stop.id = snapshot.selected.motor_id;
+            }
             (void)motor_service_execute(&stop);
             if (watchdog_expired) {
                 motor_service_note_watchdog_stop();

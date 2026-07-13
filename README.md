@@ -1,76 +1,57 @@
 # ESP32-S3 Navigation Robot Lower Controller
 
-ESP32-S3N16R8 下位机工程。目前实现第一阶段：通过板载 FTDI USB-UART
-连接 Python 上位机，对一台 M0601 RS485 电机进行速度、停止、ID 修改和
-反馈心跳测试。
+本项目是双M0601轮毂电机和BMI088的ESP32-S3下位机。USB UART与WiFi TCP
+使用同一套二进制协议，配套 `motor_test_gui.py` 可控制底盘和查看遥测。
 
-## Hardware defaults
+## 硬件默认值
 
-| Function | ESP32-S3 pin |
+| 功能 | ESP32-S3引脚 |
 |---|---:|
-| FTDI UART0 TX | GPIO43 |
-| FTDI UART0 RX | GPIO44 |
-| RS485 UART1 TX / module RX | GPIO17 |
-| RS485 UART1 RX / module TX | GPIO18 |
-| Reserved ultrasonic TRIG | GPIO5 |
-| Reserved ultrasonic ECHO | GPIO6 |
+| USB/FTDI UART0 TX/RX | GPIO43 / GPIO44 |
+| RS485 UART1 TX/RX | GPIO17 / GPIO18 |
+| BMI088 SCK/MOSI/MISO | GPIO12 / GPIO11 / GPIO13 |
+| BMI088加速度计/陀螺仪CS | GPIO47 / GPIO21 |
 
-Use the isolated automatic-direction TTL-to-RS485 module: GPIO17 TX connects to
-module RX and GPIO18 RX connects to module TX. No RTS/DE/~RE line is required.
-Do not power the motor from the development board.
+左电机ID固定为1，右电机ID固定为2。右轮安装方向相反，下位机自动反转
+右轮命令和速度反馈；上位机只使用车体逻辑RPM。应用速度上限为125RPM。
 
-## ESP-IDF firmware
+自动换向TTL-RS485模块不需要RTS、DE或RE：GPIO17连接模块RX，GPIO18连接
+模块TX，A+接A+，B+接B+，所有控制设备共地。
 
-The project is pinned to ESP-IDF 5.5.4 and the `esp32s3` target. From an
-ESP-IDF 5.5.4 PowerShell:
+## 构建与WiFi
+
+项目面向ESP-IDF 5.5.4，并已在5.4.3完成兼容构建验证：
 
 ```powershell
 idf.py set-target esp32s3
+idf.py menuconfig
 idf.py build
 idf.py -p COM_PORT flash
 ```
 
-The FTDI UART0 channel is reserved for binary application data at runtime. The
-ESP-IDF console is disabled, so `idf.py monitor` is not part of the normal
-runtime workflow. Close the GUI before flashing and close `idf.py` before
-opening the GUI. ROM boot text may appear once after reset; the GUI ignores it
-and waits for a binary HELLO acknowledgement before enabling controls.
+在 `Navigation robot configuration` 中填写WiFi STA SSID和密码。凭据只保存
+在已被Git忽略的本地 `sdkconfig`，不要写入源码。ESP32-S3仅支持2.4GHz网络。
+TCP端口默认3333，mDNS主机名默认 `navigation-robot.local`。
 
-## Host GUI
+## GUI
 
 ```powershell
 python -m pip install -r requirements-host.txt
 python motor_test_gui.py
 ```
 
-Test with the wheel lifted from the floor. The initial GUI limit is 30 RPM and
-the firmware rejects commands beyond 60 RPM. Releasing the joystick sends a
-normal zero-speed command; Emergency Stop and the 300 ms command watchdog use
-braking.
+GUI可以选择USB串口或WiFi TCP。点击“准备双轮控制”后才能使用摇杆或方向键。
+数字键1～5对应25/50/75/100/125RPM，方向键控制前后和原地左右旋转。
+测试时先架空车轮。
 
-The fallback motor ID is `1`. Normal query and control address the target ID, so
-multiple uniquely-addressed motors can share the bus. **Query unique ID** and ID
-changes remain disabled until single-motor maintenance is explicitly enabled.
-The GUI supports speed, current, and position modes; current is capped at
-±1000mA and position is entered as 0..360 degrees. Unchanged motion targets are
-not repeatedly placed on the RS485 bus: the host uses a lightweight 100 ms
-control keepalive while status polling and telemetry remain at 10 Hz.
-
-## Tests
+## 测试
 
 ```powershell
 python -m unittest tests.host.test_protocol -v
-```
-
-Pure C protocol tests can be built independently (CMake is included with an
-ESP-IDF tools installation):
-
-```powershell
 cmake -S tests/native -B build-native
 cmake --build build-native
 ctest --test-dir build-native --output-on-failure
 ```
 
-The custom host wire protocol is documented in
-[docs/host_protocol_v1.md](docs/host_protocol_v1.md). Wiring and hardware
-bring-up are documented in [docs/wiring.md](docs/wiring.md).
+完整线协议见 `docs/host_protocol_v1.md`，后续ROS2上位机开发见根目录
+`ROS2_HOST_DEVELOPMENT_GUIDE.md`。

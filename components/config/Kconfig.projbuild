@@ -32,9 +32,44 @@ config ROBOT_DEFAULT_MOTOR_ID
     range 0 255
 
 config ROBOT_TEST_MAX_RPM
-    int "Single-wheel test speed limit (RPM)"
-    default 60
+    int "Application motor speed limit (RPM)"
+    default 125
     range 1 330
+
+config ROBOT_LEFT_MOTOR_ID
+    int "Left M0601 motor ID"
+    default 1
+    range 0 255
+
+config ROBOT_RIGHT_MOTOR_ID
+    int "Right M0601 motor ID"
+    default 2
+    range 0 255
+
+config ROBOT_WIFI_ENABLED
+    bool "Enable Wi-Fi STA and TCP host link"
+    default y
+
+config ROBOT_WIFI_SSID
+    string "Wi-Fi STA SSID"
+    default ""
+    depends on ROBOT_WIFI_ENABLED
+
+config ROBOT_WIFI_PASSWORD
+    string "Wi-Fi STA password"
+    default ""
+    depends on ROBOT_WIFI_ENABLED
+
+config ROBOT_WIFI_TCP_PORT
+    int "Host protocol TCP port"
+    default 3333
+    range 1 65535
+    depends on ROBOT_WIFI_ENABLED
+
+config ROBOT_WIFI_HOSTNAME
+    string "mDNS hostname"
+    default "navigation-robot"
+    depends on ROBOT_WIFI_ENABLED
 
 config ROBOT_CONTROL_WATCHDOG_MS
     int "Host control watchdog (ms)"

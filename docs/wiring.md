@@ -44,3 +44,24 @@ motor power separate from the board supply.
 
 If a query fails, check that GPIO17 crosses to module RX and GPIO18 crosses to
 module TX, then check A+/B+ polarity, 115200 8N1 configuration, and motor power.
+
+## BMI088 SPI2
+
+| BMI088 signal | ESP32-S3 |
+|---|---:|
+| SCK | GPIO12 |
+| MOSI | GPIO11 |
+| MISO | GPIO13 |
+| Accelerometer CS | GPIO47 |
+| Gyroscope CS | GPIO21 |
+
+The installed sensor axes are the robot axes: X forward, Y left and Z up.
+Keep the robot stationary for about 2.5 seconds after boot while gyro bias is
+calibrated.
+
+## Wi-Fi
+
+ESP32-S3 supports 2.4 GHz Wi-Fi only. Configure STA credentials with
+`idf.py menuconfig`; credentials are stored only in the ignored local
+`sdkconfig`. The binary host protocol listens on TCP port 3333 and advertises
+`navigation-robot.local` through mDNS.

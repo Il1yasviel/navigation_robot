@@ -5,6 +5,7 @@
 /build-verify/
 /sdkconfig
 /sdkconfig.old
+/managed_components/
 __pycache__/
 *.py[cod]
 .vscode/
