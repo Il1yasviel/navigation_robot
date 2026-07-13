@@ -36,12 +36,19 @@ MSG_QUERY_MOTOR = 0x13
 MSG_QUERY_UNIQUE_ID = 0x14
 MSG_SET_ID = 0x15
 MSG_SET_MODE = 0x16
+MSG_SET_CURRENT = 0x17
+MSG_SET_POSITION = 0x18
+MSG_CONTROL_KEEPALIVE = 0x19
 MSG_ACK = 0x80
 MSG_HEARTBEAT = 0x90
 
 M0601_BRAKE_OFF = 0x00
 M0601_BRAKE_ON = 0xFF
 M0601_RESERVED_QUERY_ID = 0xC8
+M0601_MODE_CURRENT = 0x01
+M0601_MODE_SPEED = 0x02
+M0601_MODE_POSITION = 0x03
+MAX_CURRENT_MA = 1000.0
 SET_ID_CONFIRM = 0x4D36
 
 HANDSHAKE_INITIAL_DELAY_S = 1.0
@@ -54,6 +61,9 @@ STARTUP_PURGE_MAX_S = 1.5
 STARTUP_PURGE_QUIET_READS = 3
 POLL_EVENT_LIMIT = 32
 POLL_TIME_BUDGET_S = 0.008
+MOTION_ACK_TIMEOUT_S = 0.150
+CONTROL_KEEPALIVE_PERIOD_S = 0.100
+TELEMETRY_RATE_WINDOW_S = 2.0
 
 STATUS_TEXT = {
     0: "成功",
@@ -76,6 +86,13 @@ MOTOR_STATE_TEXT = {
     4: "急停",
 }
 
+MODE_TEXT = {
+    M0601_MODE_CURRENT: "电流模式",
+    M0601_MODE_SPEED: "速度模式",
+    M0601_MODE_POSITION: "位置模式",
+}
+MODE_BY_TEXT = {text: mode for mode, text in MODE_TEXT.items()}
+
 FAULT_NAMES = (
     "传感器",
     "过流",
@@ -86,6 +103,181 @@ FAULT_NAMES = (
     "保留6",
     "保留7",
 )
+
+
+def current_ma_to_raw(current_ma: float) -> int:
+    if not -MAX_CURRENT_MA <= current_ma <= MAX_CURRENT_MA:
+        raise ValueError(f"电流目标必须在 ±{MAX_CURRENT_MA:.0f}mA 以内")
+    return int(round(current_ma * 32767.0 / 8000.0))
+
+
+def current_raw_to_ma(current_raw: int) -> float:
+    return current_raw * 8000.0 / 32767.0
+
+
+def degrees_to_position_raw(degrees: float) -> int:
+    if not 0.0 <= degrees <= 360.0:
+        raise ValueError("位置目标必须在 0～360° 之间")
+    return int(round(degrees * 32767.0 / 360.0))
+
+
+def position_raw_to_degrees(position_raw: int) -> float:
+    return position_raw * 360.0 / 32767.0
+
+
+def control_state_flags(link_ready: bool, target_confirmed: bool,
+                        current_mode: int | None,
+                        maintenance_enabled: bool) -> dict[str, bool]:
+    motion_ready = link_ready and target_confirmed
+    return {
+        "query": link_ready,
+        "motion": motion_ready,
+        "joystick": motion_ready and current_mode == M0601_MODE_SPEED,
+        "maintenance": link_ready and maintenance_enabled,
+    }
+
+
+@dataclass(frozen=True)
+class MotionCommand:
+    msg_type: int
+    payload: bytes
+    signature: tuple[int, ...]
+    motor_id: int
+    mode: int
+    active: bool
+
+
+class MotionCommandGate:
+    """Coalesce motion updates and allow only one ACKed command in flight."""
+
+    def __init__(self, ack_timeout_s: float = MOTION_ACK_TIMEOUT_S,
+                 keepalive_period_s: float = CONTROL_KEEPALIVE_PERIOD_S) -> None:
+        self.ack_timeout_s = ack_timeout_s
+        self.keepalive_period_s = keepalive_period_s
+        self.inflight_sequence: int | None = None
+        self.inflight_command: MotionCommand | None = None
+        self.pending_command: MotionCommand | None = None
+        self.last_acked_signature: tuple[int, ...] | None = None
+        self.ack_deadline = 0.0
+        self.next_keepalive = 0.0
+        self.active_id: int | None = None
+        self.blocked = False
+
+    def reset(self) -> None:
+        self.inflight_sequence = None
+        self.inflight_command = None
+        self.pending_command = None
+        self.last_acked_signature = None
+        self.ack_deadline = 0.0
+        self.next_keepalive = 0.0
+        self.active_id = None
+        self.blocked = False
+
+    def resume(self) -> None:
+        self.blocked = False
+
+    def offer(self, command: MotionCommand) -> MotionCommand | None:
+        if self.blocked:
+            return None
+        if self.inflight_command is not None:
+            self.pending_command = (
+                None if command.signature == self.inflight_command.signature else command)
+            return None
+        if command.signature == self.last_acked_signature:
+            return None
+        return command
+
+    def mark_sent(self, sequence: int, command: MotionCommand, now: float) -> None:
+        if self.inflight_command is not None:
+            raise RuntimeError("a motion command is already awaiting ACK")
+        self.inflight_sequence = sequence
+        self.inflight_command = command
+        self.ack_deadline = now + self.ack_timeout_s
+
+    def acknowledge(self, sequence: int, success: bool,
+                    now: float) -> MotionCommand | None:
+        if sequence != self.inflight_sequence or self.inflight_command is None:
+            return None
+
+        acknowledged = self.inflight_command
+        pending = self.pending_command
+        self.inflight_sequence = None
+        self.inflight_command = None
+        self.pending_command = None
+        self.ack_deadline = 0.0
+        if not success:
+            self.active_id = None
+            self.last_acked_signature = None
+            self.blocked = True
+            return None
+
+        self.last_acked_signature = acknowledged.signature
+        self.active_id = acknowledged.motor_id if acknowledged.active else None
+        self.next_keepalive = now + self.keepalive_period_s
+        if pending is not None and pending.signature != self.last_acked_signature:
+            return pending
+        return None
+
+    def check_timeout(self, now: float) -> bool:
+        if self.inflight_command is None or now < self.ack_deadline:
+            return False
+        self.inflight_sequence = None
+        self.inflight_command = None
+        self.pending_command = None
+        self.last_acked_signature = None
+        self.active_id = None
+        self.ack_deadline = 0.0
+        self.blocked = True
+        return True
+
+    def keepalive_due(self, now: float) -> int | None:
+        if self.blocked or self.active_id is None or now < self.next_keepalive:
+            return None
+        while self.next_keepalive <= now:
+            self.next_keepalive += self.keepalive_period_s
+        return self.active_id
+
+    def reject_keepalive(self) -> None:
+        self.active_id = None
+        self.pending_command = None
+        self.blocked = True
+
+
+class TelemetryRateMeter:
+    def __init__(self, window_s: float = TELEMETRY_RATE_WINDOW_S) -> None:
+        self.window_s = window_s
+        self.samples: list[tuple[float, int, int]] = []
+        self.last_sequence: int | None = None
+        self.last_feedback: int | None = None
+        self.heartbeat_total = 0
+
+    def reset(self) -> None:
+        self.samples.clear()
+        self.last_sequence = None
+        self.last_feedback = None
+        self.heartbeat_total = 0
+
+    def update(self, now: float, sequence: int,
+               feedback_count: int) -> tuple[float, float]:
+        if self.last_feedback is not None and feedback_count < self.last_feedback:
+            self.reset()
+        if self.last_sequence is not None:
+            self.heartbeat_total += (sequence - self.last_sequence) & 0xFF
+        self.last_sequence = sequence
+        self.last_feedback = feedback_count
+        self.samples.append((now, self.heartbeat_total, feedback_count))
+        cutoff = now - self.window_s
+        while len(self.samples) > 2 and self.samples[1][0] <= cutoff:
+            del self.samples[0]
+        if len(self.samples) < 2:
+            return 0.0, 0.0
+        first_time, first_heartbeats, first_feedback = self.samples[0]
+        duration = now - first_time
+        if duration <= 0.0:
+            return 0.0, 0.0
+        heartbeat_hz = (self.heartbeat_total - first_heartbeats) / duration
+        feedback_hz = max(0, feedback_count - first_feedback) / duration
+        return heartbeat_hz, feedback_hz
 
 
 def crc16_ccitt_false(data: bytes) -> int:
@@ -355,7 +547,7 @@ class MotorTestApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("ESP32-S3 M0601 单轮测试")
-        self.root.geometry("980x720")
+        self.root.geometry("1080x780")
         self.events: queue.Queue[tuple[int, str, object]] = queue.Queue()
         self.parser = FrameParser()
         self.worker: SerialWorker | None = None
@@ -364,6 +556,10 @@ class MotorTestApp:
         self.hello_sequence: int | None = None
         self.hello_frame: bytes | None = None
         self.confirmed_id: int | None = None
+        self.current_mode: int | None = None
+        self.pending_requests: dict[int, dict[str, object]] = {}
+        self.motion_gate = MotionCommandGate()
+        self.rate_meter = TelemetryRateMeter()
         self.link_ready = False
         self.disconnect_pending = False
         self.handshake = HandshakeController()
@@ -375,14 +571,20 @@ class MotorTestApp:
         self.connection_var = tk.StringVar(value="未连接")
         self.motor_id_var = tk.StringVar(value="1")
         self.new_id_var = tk.StringVar(value="2")
+        self.maintenance_var = tk.BooleanVar(value=False)
+        self.mode_var = tk.StringVar(value=MODE_TEXT[M0601_MODE_SPEED])
+        self.target_var = tk.StringVar(value="30")
+        self.target_label_var = tk.StringVar(value="目标速度 (RPM)")
         self.max_rpm_var = tk.IntVar(value=30)
         self.reverse_var = tk.BooleanVar(value=False)
         self.axis_var = tk.StringVar(value="X=0.000  Y=0.000")
         self.status_vars = {name: tk.StringVar(value="--") for name in (
-            "state", "mode", "target", "speed", "current", "position", "temperature",
-            "fault", "age", "feedback", "errors", "uptime", "ack")}
+            "state", "mode", "target", "speed", "current", "position",
+            "fault", "communication", "rates", "age", "feedback", "errors",
+            "uptime", "ack")}
 
         self._build_ui()
+        self.motor_id_var.trace_add("write", self._target_id_changed)
         self._set_controls_enabled(False)
         self.refresh_ports()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -413,29 +615,60 @@ class MotorTestApp:
         speed_row = ttk.Frame(left)
         speed_row.pack(fill="x", pady=4)
         ttk.Label(speed_row, text="最大RPM").pack(side="left")
-        ttk.Spinbox(speed_row, from_=1, to=60, textvariable=self.max_rpm_var, width=8).pack(side="left", padx=8)
+        self.max_rpm_spinbox = ttk.Spinbox(
+            speed_row, from_=1, to=60, textvariable=self.max_rpm_var, width=8)
+        self.max_rpm_spinbox.pack(side="left", padx=8)
         ttk.Checkbutton(left, text="反转方向", variable=self.reverse_var).pack(anchor="w")
+
+        mode_box = ttk.LabelFrame(left, text="三模式控制", padding=8)
+        mode_box.pack(fill="x", pady=(10, 0))
+        self.mode_box = ttk.Combobox(
+            mode_box, textvariable=self.mode_var,
+            values=tuple(MODE_BY_TEXT), state="readonly", width=12)
+        self.mode_box.grid(row=0, column=0, sticky="ew")
+        self.mode_box.bind("<<ComboboxSelected>>", self._mode_selection_changed)
+        self.set_mode_button = ttk.Button(
+            mode_box, text="切换模式", command=self.set_motor_mode)
+        self.set_mode_button.grid(row=0, column=1, padx=(6, 0))
+        ttk.Label(mode_box, textvariable=self.target_label_var).grid(
+            row=1, column=0, sticky="w", pady=(8, 2))
+        self.target_entry = ttk.Entry(mode_box, textvariable=self.target_var, width=14)
+        self.target_entry.grid(row=2, column=0, sticky="ew")
+        self.send_target_button = ttk.Button(
+            mode_box, text="发送目标", command=self.send_target)
+        self.send_target_button.grid(row=2, column=1, padx=(6, 0))
+        mode_box.columnconfigure(0, weight=1)
 
         id_box = ttk.LabelFrame(left, text="电机ID", padding=8)
         id_box.pack(fill="x", pady=12)
-        ttk.Label(id_box, text="当前/期望").grid(row=0, column=0, sticky="w")
-        ttk.Entry(id_box, textvariable=self.motor_id_var, width=8).grid(row=0, column=1, padx=5)
+        ttk.Label(id_box, text="目标电机ID").grid(row=0, column=0, sticky="w")
+        self.motor_id_entry = ttk.Entry(id_box, textvariable=self.motor_id_var, width=8)
+        self.motor_id_entry.grid(row=0, column=1, padx=5)
+        self.query_target_button = ttk.Button(
+            id_box, text="按ID查询状态", command=self.query_target_motor)
+        self.query_target_button.grid(row=0, column=2)
+        self.maintenance_check = ttk.Checkbutton(
+            id_box, text="单电机维护（确认总线仅一台电机）",
+            variable=self.maintenance_var, command=self._maintenance_changed)
+        self.maintenance_check.grid(row=1, column=0, columnspan=3, sticky="w", pady=(7, 3))
         self.query_button = ttk.Button(
             id_box, text="查询唯一ID", command=self.query_unique_id)
-        self.query_button.grid(row=0, column=2)
-        ttk.Label(id_box, text="新ID").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(id_box, textvariable=self.new_id_var, width=8).grid(row=1, column=1, padx=5)
+        self.query_button.grid(row=2, column=2)
+        ttk.Label(id_box, text="新ID").grid(row=3, column=0, sticky="w", pady=5)
+        self.new_id_entry = ttk.Entry(id_box, textvariable=self.new_id_var, width=8)
+        self.new_id_entry.grid(row=3, column=1, padx=5)
         self.set_id_button = ttk.Button(id_box, text="修改ID", command=self.set_motor_id)
-        self.set_id_button.grid(row=1, column=2)
+        self.set_id_button.grid(row=3, column=2)
 
         right = ttk.Frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(12, 0))
         telemetry = ttk.LabelFrame(right, text="实时心跳", padding=10)
         telemetry.pack(fill="x")
         labels = (
-            ("状态", "state"), ("模式", "mode"), ("目标RPM", "target"),
-            ("实际RPM", "speed"), ("电流", "current"), ("位置", "position"),
-            ("温度原始值", "temperature"), ("故障", "fault"),
+            ("状态", "state"), ("模式", "mode"), ("模式目标", "target"),
+            ("实际RPM", "speed"), ("力矩电流", "current"), ("位置", "position"),
+            ("故障", "fault"), ("通信状态", "communication"),
+            ("刷新速率", "rates"),
             ("反馈年龄", "age"), ("有效反馈", "feedback"),
             ("错误计数", "errors"), ("MCU运行时间", "uptime"), ("最近ACK", "ack"),
         )
@@ -458,11 +691,73 @@ class MotorTestApp:
             self.port_var.set(ftdi or ports[0])
 
     def _set_controls_enabled(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        self.joystick.configure(state=state)
-        self.query_button.configure(state=state)
-        self.set_id_button.configure(state=state)
-        self.emergency_button.configure(state=state)
+        link_ready = enabled and self.link_ready
+        try:
+            target_id = self._motor_id()
+        except ValueError:
+            target_id = None
+        target_confirmed = link_ready and target_id == self.confirmed_id
+        flags = control_state_flags(
+            link_ready, target_confirmed, self.current_mode, self.maintenance_var.get())
+
+        self.joystick.configure(state="normal" if flags["joystick"] else "disabled")
+        self.max_rpm_spinbox.configure(state="normal" if flags["joystick"] else "disabled")
+        self.query_target_button.configure(state="normal" if flags["query"] else "disabled")
+        self.motor_id_entry.configure(state="normal" if flags["query"] else "disabled")
+        self.maintenance_check.configure(state="normal" if flags["query"] else "disabled")
+        self.query_button.configure(state="normal" if flags["maintenance"] else "disabled")
+        self.new_id_entry.configure(state="normal" if flags["maintenance"] else "disabled")
+        self.set_id_button.configure(
+            state="normal" if flags["maintenance"] and target_confirmed else "disabled")
+        self.mode_box.configure(state="readonly" if flags["motion"] else "disabled")
+        motion_state = "normal" if flags["motion"] else "disabled"
+        self.set_mode_button.configure(state=motion_state)
+        self.target_entry.configure(state=motion_state)
+        self.send_target_button.configure(state=motion_state)
+        self.emergency_button.configure(
+            state="normal" if target_confirmed else "disabled")
+
+    def _cancel_motion_flow(self) -> None:
+        self.motion_gate.reset()
+        stale_sequences = [
+            sequence for sequence, context in self.pending_requests.items()
+            if context.get("motion") is True
+        ]
+        for sequence in stale_sequences:
+            self.pending_requests.pop(sequence, None)
+
+    def _target_id_changed(self, *_args: object) -> None:
+        try:
+            target_id = self._motor_id()
+        except ValueError:
+            target_id = None
+        if target_id != self.confirmed_id:
+            self.confirmed_id = None
+            self.current_mode = None
+            self._cancel_motion_flow()
+        self._set_controls_enabled(self.link_ready)
+
+    def _maintenance_changed(self) -> None:
+        if self.maintenance_var.get() and not messagebox.askyesno(
+                "单电机维护",
+                "确认RS485总线上只连接了一台电机？\n"
+                "唯一ID查询和修改ID禁止在多电机总线上使用。"):
+            self.maintenance_var.set(False)
+        if not self.maintenance_var.get():
+            self.new_id_var.set("2")
+        self._set_controls_enabled(self.link_ready)
+
+    def _mode_selection_changed(self, _event: object | None = None) -> None:
+        mode = MODE_BY_TEXT.get(self.mode_var.get(), M0601_MODE_SPEED)
+        if mode == M0601_MODE_CURRENT:
+            self.target_label_var.set("目标力矩电流 (mA，±1000)")
+            self.target_var.set("0")
+        elif mode == M0601_MODE_POSITION:
+            self.target_label_var.set("目标位置 (0～360°)")
+            self.target_var.set("0")
+        else:
+            self.target_label_var.set("目标速度 (RPM，±60)")
+            self.target_var.set("30")
 
     def toggle_connection(self) -> None:
         if self.worker is None:
@@ -475,6 +770,10 @@ class MotorTestApp:
             self.reset_detector = ResetDetector()
             self.link_ready = False
             self.confirmed_id = None
+            self.current_mode = None
+            self.pending_requests.clear()
+            self.motion_gate.reset()
+            self.rate_meter.reset()
             self.hello_sequence = None
             self.hello_frame = None
             self._set_controls_enabled(False)
@@ -527,6 +826,10 @@ class MotorTestApp:
             return
         self.link_ready = False
         self.confirmed_id = None
+        self.current_mode = None
+        self.pending_requests.clear()
+        self.motion_gate.reset()
+        self.rate_meter.reset()
         self.hello_sequence = None
         self.hello_frame = None
         self._set_controls_enabled(False)
@@ -560,19 +863,28 @@ class MotorTestApp:
         self.link_ready = False
         self.disconnect_pending = False
         self.confirmed_id = None
+        self.current_mode = None
+        self.pending_requests.clear()
+        self.motion_gate.reset()
+        self.rate_meter.reset()
         self.hello_sequence = None
         self.hello_frame = None
         self._set_controls_enabled(False)
         self.connection_var.set(status)
         self.connect_button.configure(text="连接")
 
-    def send(self, msg_type: int, payload: bytes = b"", ack: bool = True) -> None:
+    def send(self, msg_type: int, payload: bytes = b"", ack: bool = True,
+             context: dict[str, object] | None = None) -> int | None:
         if self.worker is None:
-            return
-        frame = encode_frame(msg_type, self.sequence,
+            return None
+        sequence = self.sequence
+        frame = encode_frame(msg_type, sequence,
                              FLAG_ACK_REQUIRED if ack else 0, payload)
         self.sequence = (self.sequence + 1) & 0xFF
+        if ack and context is not None:
+            self.pending_requests[sequence] = {"type": msg_type, **context}
         self.worker.send(frame)
+        return sequence
 
     def _send_hello(self) -> None:
         if self.worker is None:
@@ -594,20 +906,40 @@ class MotorTestApp:
         if self.worker is None or not self.link_ready:
             return
         try:
-            payload = struct.pack("<BB", self._motor_id(),
+            motor_id = self._motor_id()
+            if motor_id != self.confirmed_id:
+                return
+            payload = struct.pack("<BB", motor_id,
                                   M0601_BRAKE_ON if emergency else M0601_BRAKE_OFF)
         except ValueError as exc:
             messagebox.showerror("ID错误", str(exc))
             return
+        self._cancel_motion_flow()
         self.send(MSG_STOP, payload)
 
+    def query_target_motor(self) -> None:
+        if not self.link_ready:
+            return
+        try:
+            motor_id = self._motor_id()
+        except ValueError as exc:
+            messagebox.showerror("ID错误", str(exc))
+            return
+        self.confirmed_id = None
+        self.current_mode = None
+        self._cancel_motion_flow()
+        self._set_controls_enabled(True)
+        self.send(MSG_QUERY_MOTOR, struct.pack("<B", motor_id),
+                  context={"id": motor_id})
+
     def query_unique_id(self) -> None:
-        if self.link_ready:
-            self.send(MSG_QUERY_UNIQUE_ID)
+        if self.link_ready and self.maintenance_var.get():
+            self.send(MSG_QUERY_UNIQUE_ID, context={"maintenance": True})
 
     def set_motor_id(self) -> None:
-        if not self.link_ready or self.confirmed_id is None:
-            messagebox.showwarning("禁止修改", "请先查询并确认总线上唯一电机的ID")
+        if (not self.link_ready or not self.maintenance_var.get() or
+                self.confirmed_id is None):
+            messagebox.showwarning("禁止修改", "请先启用单电机维护并查询确认唯一电机ID")
             return
         try:
             old_id = self._motor_id()
@@ -624,24 +956,119 @@ class MotorTestApp:
             return
         self.send_stop(True)
         self.root.after(350, lambda: self.send(
-            MSG_SET_ID, struct.pack("<BBH", old_id, new_id, SET_ID_CONFIRM)))
+            MSG_SET_ID, struct.pack("<BBH", old_id, new_id, SET_ID_CONFIRM),
+            context={"old_id": old_id, "new_id": new_id}))
+
+    def set_motor_mode(self) -> None:
+        if not self.link_ready or self.confirmed_id is None:
+            return
+        try:
+            motor_id = self._motor_id()
+            mode = MODE_BY_TEXT[self.mode_var.get()]
+        except (ValueError, KeyError) as exc:
+            messagebox.showerror("模式错误", str(exc))
+            return
+        if motor_id != self.confirmed_id:
+            messagebox.showwarning("目标未确认", "请先按目标ID查询电机状态")
+            return
+
+        def send_mode() -> None:
+            self.send(MSG_SET_MODE, struct.pack("<BB", motor_id, mode),
+                      context={"id": motor_id, "mode": mode})
+
+        if self.current_mode != mode:
+            self._cancel_motion_flow()
+            self.send_stop(False)
+            self.root.after(150, send_mode)
+
+    def _transmit_motion(self, command: MotionCommand) -> None:
+        sequence = self.send(
+            command.msg_type, command.payload,
+            context={
+                "motion": True,
+                "id": command.motor_id,
+                "mode": command.mode,
+            })
+        if sequence is not None:
+            self.motion_gate.mark_sent(sequence, command, time.monotonic())
+
+    def _queue_motion(self, command: MotionCommand) -> None:
+        ready = self.motion_gate.offer(command)
+        if ready is not None:
+            self._transmit_motion(ready)
+
+    def send_target(self) -> None:
+        if not self.link_ready or self.confirmed_id is None:
+            return
+        try:
+            motor_id = self._motor_id()
+            requested_mode = MODE_BY_TEXT[self.mode_var.get()]
+            if motor_id != self.confirmed_id or requested_mode != self.current_mode:
+                raise ValueError("目标ID或模式尚未查询确认")
+            value = float(self.target_var.get())
+            if requested_mode == M0601_MODE_SPEED:
+                if not -60.0 <= value <= 60.0:
+                    raise ValueError("速度目标必须在 ±60RPM 以内")
+                target = int(round(value))
+                msg_type = MSG_SET_SINGLE_RPM
+                payload = struct.pack("<BhBB", motor_id, target, 0, M0601_BRAKE_OFF)
+            elif requested_mode == M0601_MODE_CURRENT:
+                target = current_ma_to_raw(value)
+                msg_type = MSG_SET_CURRENT
+                payload = struct.pack("<BhBB", motor_id, target, 0, M0601_BRAKE_OFF)
+            else:
+                target = degrees_to_position_raw(value)
+                msg_type = MSG_SET_POSITION
+                payload = struct.pack("<BHBB", motor_id, target, 0, M0601_BRAKE_OFF)
+        except (ValueError, tk.TclError) as exc:
+            messagebox.showerror("目标值错误", str(exc))
+            return
+        self.motion_gate.resume()
+        self._queue_motion(MotionCommand(
+            msg_type=msg_type,
+            payload=payload,
+            signature=(msg_type, motor_id, target),
+            motor_id=motor_id,
+            mode=requested_mode,
+            active=requested_mode == M0601_MODE_POSITION or target != 0,
+        ))
 
     def _control_tick(self) -> None:
+        now = time.monotonic()
         x_value, y_value = self.joystick.x_value, self.joystick.y_value
         self.axis_var.set(f"X={x_value:+.3f}  Y={y_value:+.3f}")
-        if self.worker is not None and self.link_ready and self.joystick.active:
+        if self.motion_gate.check_timeout(now):
+            self.status_vars["ack"].set(
+                "运动命令ACK超过150ms，已停止保活并等待看门狗安全停止")
+        if (self.worker is not None and self.link_ready and self.joystick.active and
+                self.current_mode == M0601_MODE_SPEED and
+                self.confirmed_id is not None):
             try:
                 motor_id = self._motor_id()
                 max_rpm = max(1, min(60, int(self.max_rpm_var.get())))
                 y_permille = int(round(y_value * 1000))
                 if self.reverse_var.get():
                     y_permille = -y_permille
+                target_rpm = int(y_permille * max_rpm / 1000)
                 payload = struct.pack("<BhhHB", motor_id,
                                       int(round(x_value * 1000)),
                                       y_permille, max_rpm, 1)
-                self.send(MSG_JOYSTICK, payload)
+                self._queue_motion(MotionCommand(
+                    msg_type=MSG_JOYSTICK,
+                    payload=payload,
+                    signature=(MSG_JOYSTICK, motor_id, target_rpm),
+                    motor_id=motor_id,
+                    mode=M0601_MODE_SPEED,
+                    active=target_rpm != 0,
+                ))
             except (ValueError, tk.TclError):
                 pass
+
+        if self.worker is not None and self.link_ready:
+            keepalive_id = self.motion_gate.keepalive_due(now)
+            if keepalive_id is not None:
+                self.send(MSG_CONTROL_KEEPALIVE,
+                          struct.pack("<B", keepalive_id), ack=False)
         self.root.after(50, self._control_tick)
 
     def _poll(self) -> None:
@@ -687,6 +1114,7 @@ class MotorTestApp:
     def _handle_frame(self, frame: HostFrame) -> None:
         if frame.msg_type == MSG_ACK and len(frame.payload) == 4:
             request_type, status, detail = struct.unpack("<BBh", frame.payload)
+            context = self.pending_requests.pop(frame.sequence, {})
             self.status_vars["ack"].set(
                 f"命令0x{request_type:02X}: {STATUS_TEXT.get(status, status)}，detail={detail}")
             if (request_type == MSG_HELLO and status == 0 and not self.link_ready and
@@ -696,45 +1124,103 @@ class MotorTestApp:
                 self.hello_frame = None
                 self.connection_var.set(f"已连接并完成握手 {self.port_var.get()}")
                 self._set_controls_enabled(True)
-                self.root.after(100, self.query_unique_id)
-            elif request_type == MSG_QUERY_UNIQUE_ID and status == 0:
-                self.confirmed_id = detail & 0xFF
-                self.motor_id_var.set(str(self.confirmed_id))
+                self.root.after(100, self.query_target_motor)
+            elif context.get("motion") is True:
+                next_command = self.motion_gate.acknowledge(
+                    frame.sequence, status == 0, time.monotonic())
+                if next_command is not None:
+                    self._transmit_motion(next_command)
+            elif request_type == MSG_QUERY_MOTOR and status == 0:
+                queried_id = int(context.get("id", -1))
+                try:
+                    current_target = self._motor_id()
+                except ValueError:
+                    current_target = -1
+                if queried_id == current_target:
+                    self.confirmed_id = queried_id
+            elif request_type == MSG_QUERY_MOTOR:
+                self.confirmed_id = None
+                self.current_mode = None
+            elif (request_type == MSG_QUERY_UNIQUE_ID and status == 0 and
+                  self.maintenance_var.get() and context.get("maintenance") is True):
+                detected_id = detail & 0xFF
+                self.motor_id_var.set(str(detected_id))
+                self.confirmed_id = detected_id
             elif request_type == MSG_QUERY_UNIQUE_ID:
                 self.confirmed_id = None
+                self.current_mode = None
+            elif request_type == MSG_SET_MODE and status == 0:
+                requested_id = int(context.get("id", -1))
+                requested_mode = int(context.get("mode", -1))
+                if requested_id == self.confirmed_id and requested_mode in MODE_TEXT:
+                    self.current_mode = requested_mode
+                    self.mode_var.set(MODE_TEXT[requested_mode])
+                    self._mode_selection_changed()
             elif request_type == MSG_SET_ID and status == 0:
-                self.confirmed_id = detail & 0xFF
-                self.motor_id_var.set(str(self.confirmed_id))
+                detected_id = detail & 0xFF
+                self.motor_id_var.set(str(detected_id))
+                self.confirmed_id = detected_id
+            if request_type == MSG_CONTROL_KEEPALIVE and status != 0:
+                self.motion_gate.reject_keepalive()
+            self._set_controls_enabled(self.link_ready)
         elif frame.msg_type == MSG_HEARTBEAT and len(frame.payload) == 30:
-            self._handle_heartbeat(frame.payload)
+            self._handle_heartbeat(frame.payload, frame.sequence)
 
-    def _handle_heartbeat(self, payload: bytes) -> None:
+    def _handle_heartbeat(self, payload: bytes, sequence: int) -> None:
         uptime, = struct.unpack_from("<I", payload, 0)
         motor_id, mode, state, fault = struct.unpack_from("<BBBB", payload, 4)
         target, speed, current = struct.unpack_from("<hhh", payload, 8)
         drive_position, = struct.unpack_from("<H", payload, 14)
-        query_position, temperature = struct.unpack_from("<BB", payload, 16)
+        query_position, _reserved = struct.unpack_from("<BB", payload, 16)
         age, = struct.unpack_from("<H", payload, 18)
         feedback, = struct.unpack_from("<I", payload, 20)
         crc_errors, timeouts, watchdogs = struct.unpack_from("<HHH", payload, 24)
-        current_ma = current * 8000.0 / 32767.0
-        position_deg = drive_position * 360.0 / 32768.0
+        heartbeat_hz, feedback_hz = self.rate_meter.update(
+            time.monotonic(), sequence, feedback)
+        current_ma = current_raw_to_ma(current)
+        position_deg = position_raw_to_degrees(drive_position)
+        query_position_deg = query_position * 360.0 / 256.0
         faults = "无" if fault == 0 else ", ".join(
             name for bit, name in enumerate(FAULT_NAMES) if fault & (1 << bit))
         self.status_vars["state"].set(f"{MOTOR_STATE_TEXT.get(state, state)} / ID {motor_id}")
-        self.status_vars["mode"].set(str(mode))
-        self.status_vars["target"].set(str(target))
-        self.status_vars["speed"].set(str(speed))
+        self.status_vars["mode"].set(f"{MODE_TEXT.get(mode, '未知')} (0x{mode:02X})")
+        if mode == M0601_MODE_CURRENT:
+            target_text = f"{target} raw / {current_raw_to_ma(target):.1f} mA"
+        elif mode == M0601_MODE_POSITION:
+            target_text = f"{target} raw / {position_raw_to_degrees(target):.2f}°"
+        else:
+            target_text = f"{target} RPM"
+        self.status_vars["target"].set(target_text)
+        self.status_vars["speed"].set(f"{speed} RPM")
         self.status_vars["current"].set(f"{current} raw / {current_ma:.1f} mA")
         self.status_vars["position"].set(
-            f"{drive_position} raw / {position_deg:.2f}°（查询值 {query_position}）")
-        self.status_vars["temperature"].set(f"{temperature}（仅供参考）")
+            f"控制反馈 {drive_position} raw / {position_deg:.2f}°；"
+            f"查询反馈 {query_position} / {query_position_deg:.2f}°")
         self.status_vars["fault"].set(faults)
+        self.status_vars["rates"].set(
+            f"心跳 {heartbeat_hz:.1f} Hz / 电机反馈 {feedback_hz:.1f} Hz")
+        if age > 500:
+            communication = "电机离线：RS485反馈超时"
+        elif age > 200:
+            communication = (
+                "RS485反馈延迟" if heartbeat_hz >= 5.0 else "USB心跳与RS485均延迟")
+        elif 0.0 < heartbeat_hz < 5.0:
+            communication = "USB心跳延迟"
+        else:
+            communication = "正常"
+        self.status_vars["communication"].set(communication)
         self.status_vars["age"].set(f"{age} ms")
         self.status_vars["feedback"].set(str(feedback))
         self.status_vars["errors"].set(
             f"CRC {crc_errors} / 超时 {timeouts} / 看门狗 {watchdogs}")
         self.status_vars["uptime"].set(f"{uptime / 1000.0:.1f} s")
+        if motor_id == self.confirmed_id and mode in MODE_TEXT:
+            if self.current_mode != mode:
+                self._cancel_motion_flow()
+                self.current_mode = mode
+                self.mode_var.set(MODE_TEXT[mode])
+                self._mode_selection_changed()
+            self._set_controls_enabled(self.link_ready)
 
     def _log(self, direction: str, data: bytes) -> None:
         self.log.configure(state="normal")

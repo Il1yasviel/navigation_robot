@@ -1,15 +1,24 @@
 import unittest
 import queue
 import time
+from pathlib import Path
 
 from motor_test_gui import (
     FrameParser,
     HandshakeController,
+    MotionCommand,
+    MotionCommandGate,
     ResetDetector,
     SerialWorker,
+    TelemetryRateMeter,
+    control_state_flags,
     crc16_ccitt_false,
+    current_ma_to_raw,
+    current_raw_to_ma,
+    degrees_to_position_raw,
     encode_frame,
     open_ftdi_serial,
+    position_raw_to_degrees,
 )
 
 
@@ -27,6 +36,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(
             encode_frame(0x12, 1, 1, bytes.fromhex("01 FF")),
             bytes.fromhex("AA 55 01 12 01 01 02 00 01 FF 2D 0E"),
+        )
+
+    def test_keepalive_golden_frame_without_ack_request(self):
+        self.assertEqual(
+            encode_frame(0x19, 0x2A, 0, bytes((1,))),
+            bytes.fromhex("AA 55 01 19 2A 00 01 00 01 C2 72"),
         )
 
     def test_maximum_payload(self):
@@ -78,6 +93,139 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(parser.feed(b"ESP-RO"), [])
         frames = parser.feed(b"M:boot\r\n" + encode_frame(1, 5))
         self.assertEqual([frame.sequence for frame in frames], [5])
+
+
+class MotorControlUiTests(unittest.TestCase):
+    @staticmethod
+    def _motion(target: int) -> MotionCommand:
+        return MotionCommand(
+            msg_type=0x10,
+            payload=bytes((1, target & 0xFF)),
+            signature=(0x10, 1, target),
+            motor_id=1,
+            mode=2,
+            active=target != 0,
+        )
+
+    def test_current_conversion_and_limit(self):
+        self.assertEqual(current_ma_to_raw(1000.0), 4096)
+        self.assertEqual(current_ma_to_raw(-1000.0), -4096)
+        self.assertAlmostEqual(current_raw_to_ma(4096), 1000.03, places=2)
+        with self.assertRaises(ValueError):
+            current_ma_to_raw(1000.1)
+
+    def test_position_conversion_and_limit(self):
+        self.assertEqual(degrees_to_position_raw(0.0), 0)
+        self.assertEqual(degrees_to_position_raw(90.0), 8192)
+        self.assertEqual(degrees_to_position_raw(360.0), 32767)
+        self.assertAlmostEqual(position_raw_to_degrees(8192), 90.0027, places=3)
+        with self.assertRaises(ValueError):
+            degrees_to_position_raw(360.1)
+
+    def test_single_motor_maintenance_is_closed_by_default(self):
+        flags = control_state_flags(True, True, 2, False)
+        self.assertTrue(flags["motion"])
+        self.assertTrue(flags["joystick"])
+        self.assertFalse(flags["maintenance"])
+
+    def test_motion_requires_confirmed_target_and_speed_joystick_requires_mode(self):
+        self.assertFalse(control_state_flags(True, False, 2, False)["motion"])
+        self.assertFalse(control_state_flags(True, True, 1, False)["joystick"])
+        self.assertTrue(control_state_flags(True, True, 2, False)["joystick"])
+
+    def test_gui_has_no_temperature_display(self):
+        source = Path(__file__).parents[2].joinpath("motor_test_gui.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("温度", source)
+
+    def test_unchanged_motion_sends_once_then_ten_keepalives(self):
+        gate = MotionCommandGate()
+        command = self._motion(30)
+        self.assertEqual(gate.offer(command), command)
+        gate.mark_sent(7, command, 0.0)
+        self.assertIsNone(gate.acknowledge(7, True, 0.0))
+
+        keepalives = 0
+        for step in range(1, 11):
+            self.assertIsNone(gate.offer(command))
+            if gate.keepalive_due(step * 0.1001) == 1:
+                keepalives += 1
+        self.assertEqual(keepalives, 10)
+
+    def test_fast_motion_updates_keep_only_the_latest_target(self):
+        gate = MotionCommandGate()
+        first = self._motion(10)
+        middle = self._motion(20)
+        latest = self._motion(30)
+        gate.mark_sent(1, first, 0.0)
+        self.assertIsNone(gate.offer(middle))
+        self.assertIsNone(gate.offer(latest))
+        self.assertEqual(gate.inflight_sequence, 1)
+        self.assertEqual(gate.pending_command, latest)
+        self.assertEqual(gate.acknowledge(1, True, 0.01), latest)
+
+    def test_motion_ack_timeout_blocks_retries_until_resumed(self):
+        gate = MotionCommandGate()
+        command = self._motion(30)
+        gate.mark_sent(1, command, 0.0)
+        self.assertFalse(gate.check_timeout(0.149))
+        self.assertTrue(gate.check_timeout(0.151))
+        self.assertIsNone(gate.offer(command))
+        gate.resume()
+        self.assertEqual(gate.offer(command), command)
+
+    def test_reset_cancels_inflight_pending_and_keepalive(self):
+        gate = MotionCommandGate()
+        first = self._motion(10)
+        latest = self._motion(30)
+        gate.mark_sent(1, first, 0.0)
+        gate.offer(latest)
+        gate.reset()
+        self.assertIsNone(gate.inflight_command)
+        self.assertIsNone(gate.pending_command)
+        self.assertIsNone(gate.keepalive_due(1.0))
+
+    def test_telemetry_rate_meter_reports_ten_hertz(self):
+        meter = TelemetryRateMeter()
+        meter.update(0.0, 0, 100)
+        heartbeat_hz = feedback_hz = 0.0
+        for step in range(1, 21):
+            heartbeat_hz, feedback_hz = meter.update(
+                step * 0.1, step & 0xFF, 100 + step)
+        self.assertAlmostEqual(heartbeat_hz, 10.0, places=2)
+        self.assertAlmostEqual(feedback_hz, 10.0, places=2)
+
+
+class FirmwareSourceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).parents[2]
+
+    def test_keepalive_has_no_m0601_bus_transaction(self):
+        source = self.root.joinpath(
+            "components/services/src/motor_service.c").read_text(encoding="utf-8")
+        start = source.index("m0601_status_t motor_service_keepalive")
+        end = source.index("void motor_service_note_watchdog_stop", start)
+        keepalive = source[start:end]
+        self.assertNotIn("m0601_drive_", keepalive)
+        self.assertNotIn("m0601_query", keepalive)
+
+    def test_keepalive_and_ack_flag_are_dispatched(self):
+        messages = self.root.joinpath(
+            "components/protocols/include/protocols/host_messages.h").read_text(
+                encoding="utf-8")
+        service = self.root.joinpath(
+            "components/services/src/host_link_service.c").read_text(encoding="utf-8")
+        self.assertIn("HOST_MSG_CONTROL_KEEPALIVE 0x19u", messages)
+        self.assertIn("case HOST_MSG_CONTROL_KEEPALIVE:", service)
+        self.assertIn("frame->flags & HOST_FLAG_ACK_REQUIRED", service)
+        self.assertIn("host_status != HOST_STATUS_OK", service)
+
+    def test_motor_queries_use_fixed_deadlines(self):
+        source = self.root.joinpath(
+            "components/services/src/motor_service.c").read_text(encoding="utf-8")
+        self.assertIn("next_query_ms += ROBOT_MOTOR_QUERY_MS", source)
+        self.assertNotIn("last_query_ms = now", source)
 
 
 class ResetDetectorTests(unittest.TestCase):

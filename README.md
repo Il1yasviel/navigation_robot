@@ -10,15 +10,14 @@ ESP32-S3N16R8 下位机工程。目前实现第一阶段：通过板载 FTDI USB
 |---|---:|
 | FTDI UART0 TX | GPIO43 |
 | FTDI UART0 RX | GPIO44 |
-| RS485 UART1 TX / DI | GPIO17 |
-| RS485 UART1 RX / RO | GPIO18 |
-| RS485 UART1 RTS / DE+~RE | GPIO16 |
+| RS485 UART1 TX / module RX | GPIO17 |
+| RS485 UART1 RX / module TX | GPIO18 |
 | Reserved ultrasonic TRIG | GPIO5 |
 | Reserved ultrasonic ECHO | GPIO6 |
 
-Use a 3.3 V RS485 transceiver. Tie `DE` and active-low `~RE` together and
-connect them to GPIO16. Connect ESP32 and motor grounds. Do not power the motor
-from the development board.
+Use the isolated automatic-direction TTL-to-RS485 module: GPIO17 TX connects to
+module RX and GPIO18 RX connects to module TX. No RTS/DE/~RE line is required.
+Do not power the motor from the development board.
 
 ## ESP-IDF firmware
 
@@ -49,9 +48,13 @@ the firmware rejects commands beyond 60 RPM. Releasing the joystick sends a
 normal zero-speed command; Emergency Stop and the 300 ms command watchdog use
 braking.
 
-The fallback motor ID is `1`. Use **Query unique ID** with exactly one motor on
-the RS485 bus to discover its actual ID. ID changes are blocked until the ID is
-confirmed and the motor has reported a stopped state three times.
+The fallback motor ID is `1`. Normal query and control address the target ID, so
+multiple uniquely-addressed motors can share the bus. **Query unique ID** and ID
+changes remain disabled until single-motor maintenance is explicitly enabled.
+The GUI supports speed, current, and position modes; current is capped at
+±1000mA and position is entered as 0..360 degrees. Unchanged motion targets are
+not repeatedly placed on the RS485 bus: the host uses a lightweight 100 ms
+control keepalive while status polling and telemetry remain at 10 Hz.
 
 ## Tests
 

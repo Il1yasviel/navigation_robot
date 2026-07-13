@@ -11,6 +11,9 @@
 #define HOST_MSG_QUERY_UNIQUE_ID   0x14u
 #define HOST_MSG_SET_ID            0x15u
 #define HOST_MSG_SET_MODE          0x16u
+#define HOST_MSG_SET_CURRENT       0x17u
+#define HOST_MSG_SET_POSITION      0x18u
+#define HOST_MSG_CONTROL_KEEPALIVE 0x19u
 #define HOST_MSG_ACK               0x80u
 #define HOST_MSG_HEARTBEAT         0x90u
 #define HOST_MSG_EVENT             0x91u

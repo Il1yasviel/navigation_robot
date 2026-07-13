@@ -9,6 +9,8 @@
 
 typedef enum {
     MOTOR_ACTION_SET_RPM,
+    MOTOR_ACTION_SET_CURRENT,
+    MOTOR_ACTION_SET_POSITION,
     MOTOR_ACTION_STOP,
     MOTOR_ACTION_QUERY,
     MOTOR_ACTION_QUERY_UNIQUE_ID,
@@ -19,7 +21,7 @@ typedef enum {
 typedef struct {
     motor_action_t action;
     uint8_t id;
-    int16_t target_rpm;
+    int16_t target_value;
     uint8_t accel;
     uint8_t brake;
     uint8_t expected_old_id;
@@ -39,14 +41,14 @@ typedef struct {
     uint8_t mode;
     uint8_t state;
     uint8_t fault;
-    int16_t target_rpm;
+    int16_t target_value;
     int16_t actual_rpm;
     int16_t current_raw;
     uint16_t drive_position_raw;
     uint8_t query_position_u8;
-    uint8_t temperature_raw;
     uint8_t stationary_samples;
-    bool id_confirmed;
+    bool address_confirmed;
+    bool control_active;
 } motor_snapshot_t;
 
 typedef struct {
@@ -58,6 +60,7 @@ esp_err_t motor_service_start(void);
 motor_response_t motor_service_execute(const motor_request_t *request);
 void motor_service_get_snapshot(motor_snapshot_t *snapshot);
 void motor_service_mark_control_received(void);
+m0601_status_t motor_service_keepalive(uint8_t id);
 void motor_service_note_watchdog_stop(void);
 
 #endif

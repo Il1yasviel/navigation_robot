@@ -61,10 +61,13 @@ static bool valid_motor_id(uint8_t id)
     return id != M0601_ID_QUERY_ADDRESS;
 }
 
-static motor_response_t execute_and_mark(const motor_request_t *request)
+static motor_response_t execute_control(const motor_request_t *request)
 {
-    motor_service_mark_control_received();
-    return motor_service_execute(request);
+    motor_response_t response = motor_service_execute(request);
+    if (response.status == M0601_OK) {
+        motor_service_mark_control_received();
+    }
+    return response;
 }
 
 static void dispatch_host_frame(void *context, const host_frame_t *frame)
@@ -86,16 +89,54 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
         }
         request.action = MOTOR_ACTION_SET_RPM;
         request.id = frame->payload[0];
-        request.target_rpm = robot_read_i16_le(&frame->payload[1]);
+        request.target_value = robot_read_i16_le(&frame->payload[1]);
         request.accel = frame->payload[3];
         request.brake = frame->payload[4];
         if (!valid_motor_id(request.id)) {
             host_status = HOST_STATUS_RANGE;
             break;
         }
-        response = execute_and_mark(&request);
+        response = execute_control(&request);
         host_status = map_motor_status(response.status);
         break;
+
+    case HOST_MSG_SET_CURRENT:
+        if (frame->payload_length != 5u) {
+            host_status = HOST_STATUS_BAD_LENGTH;
+            break;
+        }
+        request.action = MOTOR_ACTION_SET_CURRENT;
+        request.id = frame->payload[0];
+        request.target_value = robot_read_i16_le(&frame->payload[1]);
+        request.accel = frame->payload[3];
+        request.brake = frame->payload[4];
+        if (!valid_motor_id(request.id)) {
+            host_status = HOST_STATUS_RANGE;
+            break;
+        }
+        response = execute_control(&request);
+        host_status = map_motor_status(response.status);
+        break;
+
+    case HOST_MSG_SET_POSITION: {
+        if (frame->payload_length != 5u) {
+            host_status = HOST_STATUS_BAD_LENGTH;
+            break;
+        }
+        request.action = MOTOR_ACTION_SET_POSITION;
+        request.id = frame->payload[0];
+        const uint16_t position = robot_read_u16_le(&frame->payload[1]);
+        if (position > M0601_POSITION_RAW_MAX || !valid_motor_id(request.id)) {
+            host_status = HOST_STATUS_RANGE;
+            break;
+        }
+        request.target_value = (int16_t)position;
+        request.accel = frame->payload[3];
+        request.brake = frame->payload[4];
+        response = execute_control(&request);
+        host_status = map_motor_status(response.status);
+        break;
+    }
 
     case HOST_MSG_JOYSTICK:
         if (frame->payload_length != 8u) {
@@ -112,13 +153,13 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
             request.brake = M0601_BRAKE_OFF;
         } else {
             request.action = MOTOR_ACTION_SET_RPM;
-            request.target_rpm = joystick_single_wheel_rpm(
+            request.target_value = joystick_single_wheel_rpm(
                 robot_read_i16_le(&frame->payload[3]),
                 robot_read_u16_le(&frame->payload[5]));
             request.accel = M0601_ACCEL_DEFAULT;
             request.brake = M0601_BRAKE_OFF;
         }
-        response = execute_and_mark(&request);
+        response = execute_control(&request);
         host_status = map_motor_status(response.status);
         break;
 
@@ -134,8 +175,20 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
             host_status = HOST_STATUS_RANGE;
             break;
         }
-        response = execute_and_mark(&request);
+        response = execute_control(&request);
         host_status = map_motor_status(response.status);
+        break;
+
+    case HOST_MSG_CONTROL_KEEPALIVE:
+        if (frame->payload_length != 1u) {
+            host_status = HOST_STATUS_BAD_LENGTH;
+            break;
+        }
+        if (!valid_motor_id(frame->payload[0])) {
+            host_status = HOST_STATUS_RANGE;
+            break;
+        }
+        host_status = map_motor_status(motor_service_keepalive(frame->payload[0]));
         break;
 
     case HOST_MSG_QUERY_MOTOR:
@@ -145,6 +198,10 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
         }
         request.action = MOTOR_ACTION_QUERY;
         request.id = frame->payload[0];
+        if (!valid_motor_id(request.id)) {
+            host_status = HOST_STATUS_RANGE;
+            break;
+        }
         response = motor_service_execute(&request);
         host_status = map_motor_status(response.status);
         break;
@@ -188,6 +245,13 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
         request.action = MOTOR_ACTION_SET_MODE;
         request.id = frame->payload[0];
         request.mode = frame->payload[1];
+        if (!valid_motor_id(request.id) ||
+            (request.mode != M0601_MODE_CURRENT &&
+             request.mode != M0601_MODE_SPEED &&
+             request.mode != M0601_MODE_POSITION)) {
+            host_status = HOST_STATUS_RANGE;
+            break;
+        }
         response = motor_service_execute(&request);
         host_status = map_motor_status(response.status);
         break;
@@ -197,7 +261,10 @@ static void dispatch_host_frame(void *context, const host_frame_t *frame)
         break;
     }
 
-    send_ack(frame, host_status, response.detail);
+    if ((frame->flags & HOST_FLAG_ACK_REQUIRED) != 0u ||
+        host_status != HOST_STATUS_OK) {
+        send_ack(frame, host_status, response.detail);
+    }
 }
 
 static void host_uart_receive_task(void *argument)
@@ -233,12 +300,12 @@ static void telemetry_task(void *argument)
         payload[5] = snapshot.mode;
         payload[6] = snapshot.state;
         payload[7] = snapshot.fault;
-        robot_write_i16_le(&payload[8], snapshot.target_rpm);
+        robot_write_i16_le(&payload[8], snapshot.target_value);
         robot_write_i16_le(&payload[10], snapshot.actual_rpm);
         robot_write_i16_le(&payload[12], snapshot.current_raw);
         robot_write_u16_le(&payload[14], snapshot.drive_position_raw);
         payload[16] = snapshot.query_position_u8;
-        payload[17] = snapshot.temperature_raw;
+        payload[17] = 0u;
         uint32_t age = snapshot.uptime_ms - snapshot.last_feedback_ms;
         if (age > UINT16_MAX) age = UINT16_MAX;
         robot_write_u16_le(&payload[18], (uint16_t)age);

@@ -77,8 +77,44 @@ static void test_m0601_protocol(void)
     assert(m0601_build_drive_speed(1, 331, 0, 0, frame) == M0601_ERROR_RANGE);
     assert(m0601_build_drive_raw(1, INT16_MIN, 0, 0, frame) == M0601_ERROR_RANGE);
 
+    static const uint8_t expected_positive_speed[] = {
+        0x01, 0x64, 0x00, 0x96, 0x00, 0x00, 0x00, 0x00, 0x00, 0x53,
+    };
+    static const uint8_t expected_zero[] = {
+        0x01, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x50,
+    };
+    static const uint8_t expected_negative_speed[] = {
+        0x01, 0x64, 0xFF, 0x6A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5A,
+    };
+    static const uint8_t expected_position_quarter[] = {
+        0x01, 0x64, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xBF,
+    };
+    static const uint8_t expected_query[] = {
+        0x01, 0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+    };
+    assert(m0601_build_drive_speed(1, 150, 0, 0, frame) == M0601_OK);
+    assert(memcmp(frame, expected_positive_speed, sizeof(frame)) == 0);
+    assert(m0601_build_drive_speed(1, 0, 0, 0, frame) == M0601_OK);
+    assert(memcmp(frame, expected_zero, sizeof(frame)) == 0);
+    assert(m0601_build_drive_speed(1, -150, 0, 0, frame) == M0601_OK);
+    assert(memcmp(frame, expected_negative_speed, sizeof(frame)) == 0);
+    assert(m0601_build_drive_position(1, 8192, 0, 0, frame) == M0601_OK);
+    assert(memcmp(frame, expected_position_quarter, sizeof(frame)) == 0);
+    assert(m0601_build_query(1, frame) == M0601_OK);
+    assert(memcmp(frame, expected_query, sizeof(frame)) == 0);
+
+    assert(m0601_build_set_mode(1, M0601_MODE_CURRENT, frame) == M0601_OK);
+    assert(frame[0] == 1 && frame[1] == 0xA0 && frame[9] == M0601_MODE_CURRENT);
+    assert(m0601_build_set_mode(1, M0601_MODE_SPEED, frame) == M0601_OK);
+    assert(frame[9] == M0601_MODE_SPEED);
+    assert(m0601_build_set_mode(1, M0601_MODE_POSITION, frame) == M0601_OK);
+    assert(frame[9] == M0601_MODE_POSITION);
+
     assert(m0601_build_id_query(frame) == M0601_OK);
-    assert(frame[0] == 0xC8 && frame[1] == 0x64 && m0601_check_crc(frame));
+    static const uint8_t expected_id_query[] = {
+        0xC8, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE,
+    };
+    assert(memcmp(frame, expected_id_query, sizeof(frame)) == 0);
 
     fake_transport_t fake = {0};
     const m0601_transport_t transport = {

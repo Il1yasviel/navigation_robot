@@ -15,7 +15,7 @@ static void safety_task(void *argument)
         motor_service_get_snapshot(&snapshot);
         const uint32_t age = esp32_time_millis() - snapshot.last_control_ms;
         const bool watchdog_expired = age >= CONFIG_ROBOT_CONTROL_WATCHDOG_MS;
-        if (snapshot.target_rpm != 0 &&
+        if (snapshot.control_active &&
             (watchdog_expired || snapshot.fault != 0u)) {
             const motor_request_t stop = {
                 .action = MOTOR_ACTION_STOP,

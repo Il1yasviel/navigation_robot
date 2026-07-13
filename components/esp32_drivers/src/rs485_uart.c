@@ -33,11 +33,12 @@ esp_err_t esp32_rs485_init(esp32_rs485_t *bus)
         status = uart_set_pin(port,
                               CONFIG_ROBOT_RS485_TX_GPIO,
                               CONFIG_ROBOT_RS485_RX_GPIO,
-                              CONFIG_ROBOT_RS485_RTS_GPIO,
+                              UART_PIN_NO_CHANGE,
                               UART_PIN_NO_CHANGE);
     }
     if (status == ESP_OK) {
-        status = uart_set_mode(port, UART_MODE_RS485_HALF_DUPLEX);
+        /* The isolated TTL-to-RS485 module switches TX/RX automatically. */
+        status = uart_set_mode(port, UART_MODE_UART);
     }
     if (status != ESP_OK) {
         (void)uart_driver_delete(port);

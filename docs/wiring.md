@@ -15,19 +15,20 @@ The same COM port is used for flashing and the application, so only one of
 DTR and RTS before opening the port to avoid the FTDI auto-program circuit
 holding the ESP32-S3 in reset.
 
-## RS485 transceiver
+## Isolated automatic-direction TTL-to-RS485 module
 
 ```text
-ESP32-S3 GPIO17 (UART1 TX)  -> DI
-ESP32-S3 GPIO18 (UART1 RX)  <- RO
-ESP32-S3 GPIO16 (UART1 RTS) -> DE and ~RE tied together
-Transceiver A/B             -> M0601 A/B
-ESP32 GND                   -> transceiver GND -> motor signal GND
+ESP32-S3 GPIO17 (UART1 TX)  -> module RX
+ESP32-S3 GPIO18 (UART1 RX)  <- module TX
+ESP32 GND                   -> module TTL-side GND
+Module A+                   -> M0601 A+
+Module B+                   -> M0601 B+
 ```
 
-Use a 3.3 V logic-compatible transceiver such as MAX3485. Keep motor power
-separate from the board supply. Add 120-ohm termination at the physical bus
-ends for longer cables; do not add termination at every motor.
+Power the module according to its own terminal marking and manual. The isolated
+module switches transmit and receive direction internally, so no RTS/DE/~RE
+connection is used. Its onboard 120-ohm termination is enabled by default. Keep
+motor power separate from the board supply.
 
 ## Safe first test
 
@@ -35,10 +36,11 @@ ends for longer cables; do not add termination at every motor.
 2. Connect exactly one motor to RS485 when querying or changing ID.
 3. Flash the firmware, then close the flashing process.
 4. Start the GUI and connect the FTDI COM port; wait for HELLO handshake success.
-5. Run **Query unique ID**. Do not change ID until it succeeds.
+5. For a known ID, run **Query target ID status**. Enable single-motor
+   maintenance before **Query unique ID** or changing ID.
 6. Set the GUI limit to 20 RPM and briefly move the joystick forward.
 7. Release, verify zero RPM, then briefly reverse.
 8. While running slowly, unplug USB and verify braking within 300 ms.
 
-If Query ID fails, first swap RS485 A/B, then check common ground, GPIO16
-DE/~RE wiring, 115200 8N1 configuration, and motor power.
+If a query fails, check that GPIO17 crosses to module RX and GPIO18 crosses to
+module TX, then check A+/B+ polarity, 115200 8N1 configuration, and motor power.

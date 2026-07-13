@@ -26,10 +26,6 @@ config ROBOT_RS485_RX_GPIO
     int "RS485 RX/RO GPIO"
     default 18
 
-config ROBOT_RS485_RTS_GPIO
-    int "RS485 RTS/DE GPIO"
-    default 16
-
 config ROBOT_DEFAULT_MOTOR_ID
     int "Fallback M0601 motor ID"
     default 1
