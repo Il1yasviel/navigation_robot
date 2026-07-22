@@ -44,6 +44,25 @@ GUI可以选择USB串口或WiFi TCP。点击“准备双轮控制”后才能使
 数字键1～5对应25/50/75/100/125RPM，方向键控制前后和原地左右旋转。
 测试时先架空车轮。
 
+## 上位机目录结构
+
+上位机代码位于 `host/` 包，按“纯逻辑 → 领域逻辑 → 传输层 → 界面层”分层：
+
+| 模块 | 内容 |
+|---|---|
+| `host/config.py` | 限额、电机ID、超时/周期常量与界面文案映射 |
+| `host/protocol.py` | 线协议常量、CRC16、`encode_frame`、`FrameParser` |
+| `host/mapping.py` | 电流/位置换算、摇杆与键盘映射、控制使能标志 |
+| `host/motion.py` | `MotionCommand`、`MotionCommandGate`（ACK门控与保活） |
+| `host/telemetry.py` | `TelemetryRateMeter` 与底盘/IMU遥测载荷纯解析 |
+| `host/link.py` | `HandshakeController`、`ResetDetector` |
+| `host/transport.py` | `open_ftdi_serial`、`SerialWorker`、`TcpWorker` |
+| `host/joystick.py` | `VirtualJoystick` 虚拟摇杆控件 |
+| `host/app.py` | `MotorTestApp` 主界面与 `main()` |
+
+两种启动方式等价：根目录 `python motor_test_gui.py`（兼容 shim）或
+`python -m host`。
+
 ## 测试
 
 ```powershell

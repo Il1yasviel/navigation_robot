@@ -4,27 +4,21 @@ import socket
 import time
 from pathlib import Path
 
-from motor_test_gui import (
-    FrameParser,
-    HandshakeController,
-    MotionCommand,
-    MotionCommandGate,
-    ResetDetector,
-    SerialWorker,
-    TcpWorker,
-    TelemetryRateMeter,
+from host.config import SPEED_GEARS
+from host.link import HandshakeController, ResetDetector
+from host.mapping import (
     control_state_flags,
-    crc16_ccitt_false,
     current_ma_to_raw,
     current_raw_to_ma,
     degrees_to_position_raw,
     differential_rpm,
-    encode_frame,
     keyboard_direction_rpm,
-    open_ftdi_serial,
     position_raw_to_degrees,
-    SPEED_GEARS,
 )
+from host.motion import MotionCommand, MotionCommandGate
+from host.protocol import FrameParser, crc16_ccitt_false, encode_frame
+from host.telemetry import TelemetryRateMeter
+from host.transport import SerialWorker, TcpWorker, open_ftdi_serial
 
 
 class ProtocolTests(unittest.TestCase):
@@ -154,10 +148,11 @@ class MotorControlUiTests(unittest.TestCase):
         self.assertTrue(control_state_flags(True, True, 2, False)["joystick"])
 
     def test_gui_has_no_temperature_display(self):
-        source = Path(__file__).parents[2].joinpath("motor_test_gui.py").read_text(
-            encoding="utf-8")
-        self.assertNotIn("温度", source)
-        self.assertNotIn("temperature", source.lower())
+        host_dir = Path(__file__).parents[2] / "host"
+        for source_path in sorted(host_dir.glob("*.py")):
+            source = source_path.read_text(encoding="utf-8")
+            self.assertNotIn("温度", source)
+            self.assertNotIn("temperature", source.lower())
 
     def test_five_speed_gears_and_keyboard_directions(self):
         self.assertEqual(SPEED_GEARS, (25, 50, 75, 100, 125))
