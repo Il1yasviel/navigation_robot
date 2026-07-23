@@ -60,8 +60,9 @@ GUI可以选择USB串口或WiFi TCP。点击“准备双轮控制”后才能使
 | `host/joystick.py` | `VirtualJoystick` 虚拟摇杆控件 |
 | `host/app.py` | `MotorTestApp` 主界面与 `main()` |
 
-两种启动方式等价：根目录 `python motor_test_gui.py`（兼容 shim）或
-`python -m host`。
+启动方式等价：根目录 `python motor_test_gui.py`（兼容 shim）、`python -m host`、
+或直接运行 `host/__main__.py`（内置路径引导，VS Code 打开该文件点“运行”即可；
+也可用调试面板的 “Python: 上位机GUI” 配置从任意文件 F5 启动）。
 
 ## 测试
 
