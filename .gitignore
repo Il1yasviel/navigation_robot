@@ -6,6 +6,7 @@
 /sdkconfig
 /sdkconfig.old
 /managed_components/
+/logs/
 __pycache__/
 *.py[cod]
 .vscode/

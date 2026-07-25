@@ -50,7 +50,13 @@ def _decode_motor_record(payload: bytes, offset: int) -> dict[str, int]:
     age = struct.unpack_from("<H", payload, offset + 14)[0]
     feedback = struct.unpack_from("<I", payload, offset + 16)[0]
     crc_errors, timeouts = struct.unpack_from("<HH", payload, offset + 20)
-    return locals()
+    return {
+        "motor_id": motor_id, "mode": mode, "state": state, "fault": fault,
+        "target": target, "speed": speed, "current": current,
+        "position": position, "query_position": query_position,
+        "age": age, "feedback": feedback,
+        "crc_errors": crc_errors, "timeouts": timeouts,
+    }
 
 
 def decode_chassis_telemetry(

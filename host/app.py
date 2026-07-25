@@ -1,10 +1,13 @@
 """MotorTestApp 主界面与程序入口。"""
 from __future__ import annotations
 
+import json
 import queue
 import struct
 import time
 import tkinter as tk
+from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
@@ -64,6 +67,7 @@ class MotorTestApp:
         self.dual_ready = False
         self.pressed_directions: list[str] = []
         self.latest_imu: tuple[object, ...] | None = None
+        self.latest_chassis_data: dict[str, object] | None = None
         self.next_imu_render = 0.0
 
         self.connection_type_var = tk.StringVar(value="USB串口")
@@ -121,6 +125,7 @@ class MotorTestApp:
         self.connect_button.pack(side="left", padx=8)
         ttk.Label(top, textvariable=self.connection_var).pack(side="left", padx=6)
         ttk.Button(top, text="急停双轮", command=lambda: self.send_dual_stop(True)).pack(side="right")
+        ttk.Button(top, text="诊断快照", command=self._take_snapshot).pack(side="right", padx=6)
 
         body = ttk.Panedwindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -803,6 +808,14 @@ class MotorTestApp:
         now = time.monotonic()
         left_rates = self.left_rate.update(now, sequence, left["feedback"])
         right_rates = self.right_rate.update(now, sequence, right["feedback"])
+        self.latest_chassis_data = {
+            "uptime_ms": uptime,
+            "owner": owner,
+            "flags": flags,
+            "watchdog_stops": watchdogs,
+            "left": {**left, "telemetry_hz": left_rates[0], "feedback_hz": left_rates[1]},
+            "right": {**right, "telemetry_hz": right_rates[0], "feedback_hz": right_rates[1]},
+        }
         self.owner_var.set({0: "无", 1: "USB串口", 2: "WiFi TCP"}.get(owner, str(owner)))
         for side, record, rates in (("left", left, left_rates),
                                     ("right", right, right_rates)):
@@ -843,6 +856,58 @@ class MotorTestApp:
         rate = self.imu_rate.update(time.monotonic(), sequence, samples)
         self.latest_imu = (timestamp, flags, accel, gyro, samples,
                            read_errors, init_errors, rate)
+
+    def _take_snapshot(self) -> None:
+        """把当前连接、底盘、IMU 的全部最新状态写入 logs/ 下的 JSON 文件。"""
+        try:
+            path = self._write_snapshot()
+        except Exception as exc:
+            messagebox.showerror("诊断快照", f"保存失败：{type(exc).__name__}: {exc}")
+            return
+        messagebox.showinfo("诊断快照", f"已保存：{path}")
+
+    def _write_snapshot(self) -> Path:
+        stamp = datetime.now()
+        directory = Path(__file__).resolve().parents[1] / "logs"
+        directory.mkdir(exist_ok=True)
+        path = directory / f"snapshot_{stamp:%Y%m%d_%H%M%S}.json"
+        imu_data: dict[str, object] | None = None
+        if self.latest_imu is not None:
+            timestamp, flags, accel, gyro, samples, read_errors, init_errors, rate = (
+                self.latest_imu)
+            imu_data = {
+                "timestamp_us": timestamp,
+                "online": bool(flags & 0x01),
+                "calibrated": bool(flags & 0x02),
+                "sample_valid": bool(flags & 0x04),
+                "accel_mps2": list(accel),
+                "gyro_rads": list(gyro),
+                "samples": samples,
+                "read_errors": read_errors,
+                "init_errors": init_errors,
+                "frame_hz": rate[0],
+                "sample_hz": rate[1],
+            }
+        payload = {
+            "created": stamp.isoformat(),
+            "connection": {
+                "type": self.connection_type_var.get(),
+                "endpoint": (f"{self.host_var.get()}:{self.tcp_port_var.get()}"
+                             if self.connection_type_var.get() == "WiFi TCP"
+                             else self.port_var.get()),
+                "status": self.connection_var.get(),
+                "link_ready": self.link_ready,
+            },
+            "latest_ack": self.ack_var.get(),
+            "control_owner": self.owner_var.get(),
+            "dual_prepared": self.dual_prepared,
+            "dual_ready": self.dual_ready,
+            "chassis": self.latest_chassis_data,
+            "imu": imu_data,
+        }
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+        return path
 
     def _render_imu(self) -> None:
         if self.latest_imu is None:
