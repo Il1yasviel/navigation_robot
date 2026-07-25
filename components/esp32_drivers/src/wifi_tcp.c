@@ -192,6 +192,18 @@ esp_err_t esp32_wifi_tcp_start(esp32_wifi_tcp_receive_fn receive,
     status = esp_event_loop_create_default();
     if (status != ESP_OK && status != ESP_ERR_INVALID_STATE) return status;
     if (esp_netif_create_default_wifi_sta() == NULL) return ESP_FAIL;
+    /* 静态 IP 配置：非空时关闭 DHCP 并手动设置 */
+    if (CONFIG_ROBOT_WIFI_STATIC_IP[0] != '\0') {
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif == NULL) return ESP_FAIL;
+        (void)esp_netif_dhcpc_stop(netif);
+        esp_netif_ip_info_t ip_info = {0};
+        ip_info.ip.addr = esp_ip4addr_aton(CONFIG_ROBOT_WIFI_STATIC_IP);
+        ip_info.gw.addr = esp_ip4addr_aton(CONFIG_ROBOT_WIFI_STATIC_GW);
+        ip_info.netmask.addr = esp_ip4addr_aton(CONFIG_ROBOT_WIFI_STATIC_NETMASK);
+        status = esp_netif_set_ip_info(netif, &ip_info);
+        if (status != ESP_OK) return status;
+    }
     const wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     if ((status = esp_wifi_init(&init)) != ESP_OK) return status;
     (void)esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,

@@ -72,7 +72,7 @@ class MotorTestApp:
 
         self.connection_type_var = tk.StringVar(value="USB串口")
         self.port_var = tk.StringVar()
-        self.host_var = tk.StringVar(value="navigation-robot.local")
+        self.host_var = tk.StringVar(value="192.168.137.100")
         self.tcp_port_var = tk.IntVar(value=3333)
         self.connection_var = tk.StringVar(value="未连接")
         self.gear_var = tk.IntVar(value=25)

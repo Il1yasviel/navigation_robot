@@ -71,6 +71,21 @@ config ROBOT_WIFI_HOSTNAME
     default "navigation-robot"
     depends on ROBOT_WIFI_ENABLED
 
+config ROBOT_WIFI_STATIC_IP
+    string "Static IP address (empty = DHCP)"
+    default ""
+    depends on ROBOT_WIFI_ENABLED
+
+config ROBOT_WIFI_STATIC_GW
+    string "Static IP gateway"
+    default ""
+    depends on ROBOT_WIFI_ENABLED
+
+config ROBOT_WIFI_STATIC_NETMASK
+    string "Static IP netmask"
+    default "255.255.255.0"
+    depends on ROBOT_WIFI_ENABLED
+
 config ROBOT_CONTROL_WATCHDOG_MS
     int "Host control watchdog (ms)"
     default 300
