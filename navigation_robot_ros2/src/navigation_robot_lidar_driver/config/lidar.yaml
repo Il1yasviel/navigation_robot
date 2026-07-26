@@ -1,0 +1,11 @@
+lidar_node:
+  ros__parameters:
+    port_name: /dev/navigation_lidar
+    baud_rate: 150000
+    frame_id: lidar_link
+    scan_topic: /scan
+    range_min: 0.05
+    range_max: 8.0
+    inverted: true
+    scan_size: 720
+    reconnect_interval_sec: 1.0

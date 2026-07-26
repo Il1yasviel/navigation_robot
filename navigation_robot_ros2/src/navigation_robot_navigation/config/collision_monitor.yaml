@@ -1,0 +1,35 @@
+collision_monitor:
+  ros__parameters:
+    use_sim_time: false
+    base_frame_id: base_footprint
+    odom_frame_id: odom
+    cmd_vel_in_topic: /cmd_vel_muxed
+    cmd_vel_out_topic: /cmd_vel
+    state_topic: /collision_monitor_state
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    stop_pub_timeout: 1.0
+    polygons: ["StopPolygon", "SlowdownPolygon"]
+    # Placeholders: replace from measured footprint (+0.10 m / +0.25 m).
+    StopPolygon:
+      type: polygon
+      points: [0.40, 0.30, 0.40, -0.30, -0.30, -0.30, -0.30, 0.30]
+      action_type: stop
+      max_points: 3
+      enabled: true
+      visualize: true
+      polygon_pub_topic: /collision_monitor/stop_polygon
+    SlowdownPolygon:
+      type: polygon
+      points: [0.55, 0.45, 0.55, -0.45, -0.45, -0.45, -0.45, 0.45]
+      action_type: slowdown
+      slowdown_ratio: 0.35
+      max_points: 3
+      enabled: true
+      visualize: true
+      polygon_pub_topic: /collision_monitor/slowdown_polygon
+    observation_sources: ["scan"]
+    scan:
+      type: scan
+      topic: /scan
+      enabled: true

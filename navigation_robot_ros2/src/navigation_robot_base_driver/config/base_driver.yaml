@@ -1,0 +1,18 @@
+base_driver:
+  ros__parameters:
+    transport: serial
+    serial_port: /dev/navigation_base
+    baud_rate: 115200
+    tcp_host: navigation-robot.local
+    tcp_port: 3333
+    wheel_radius_m: 0.0
+    wheel_separation_m: 0.0
+    max_rpm: 125.0
+    max_linear_velocity: 0.25
+    max_angular_velocity: 0.8
+    motion_enabled: false
+    command_timeout_sec: 0.2
+    keepalive_period_sec: 0.1
+    odom_frame_id: odom
+    base_frame_id: base_footprint
+    imu_frame_id: imu_link

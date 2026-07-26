@@ -1,0 +1,2 @@
+# Upstream device identification: VID 34bf, PID ff0a.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="34bf", ATTRS{idProduct}=="ff0a", MODE="0660", GROUP="dialout", SYMLINK+="navigation_lidar"

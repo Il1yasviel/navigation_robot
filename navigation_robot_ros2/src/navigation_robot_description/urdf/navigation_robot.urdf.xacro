@@ -1,0 +1,88 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="navigation_robot">
+  <xacro:arg name="wheel_radius" default="0.05"/>
+  <xacro:arg name="wheel_separation" default="0.25"/>
+  <xacro:arg name="chassis_front" default="0.20"/>
+  <xacro:arg name="chassis_rear" default="0.10"/>
+  <xacro:arg name="chassis_left" default="0.15"/>
+  <xacro:arg name="chassis_right" default="0.15"/>
+  <xacro:arg name="chassis_height" default="0.08"/>
+  <xacro:arg name="lidar_x" default="0"/><xacro:arg name="lidar_y" default="0"/><xacro:arg name="lidar_z" default="0"/>
+  <xacro:arg name="lidar_roll" default="0"/><xacro:arg name="lidar_pitch" default="0"/><xacro:arg name="lidar_yaw" default="0"/>
+  <xacro:arg name="camera_x" default="0"/><xacro:arg name="camera_y" default="0"/><xacro:arg name="camera_z" default="0"/>
+  <xacro:arg name="camera_roll" default="0"/><xacro:arg name="camera_pitch" default="0"/><xacro:arg name="camera_yaw" default="0"/>
+  <xacro:arg name="imu_x" default="0"/><xacro:arg name="imu_y" default="0"/><xacro:arg name="imu_z" default="0"/>
+  <xacro:arg name="imu_roll" default="0"/><xacro:arg name="imu_pitch" default="0"/><xacro:arg name="imu_yaw" default="0"/>
+
+  <xacro:property name="r" value="$(arg wheel_radius)"/>
+  <xacro:property name="w" value="$(arg wheel_separation)"/>
+  <xacro:property name="front" value="$(arg chassis_front)"/>
+  <xacro:property name="rear" value="$(arg chassis_rear)"/>
+  <xacro:property name="left" value="$(arg chassis_left)"/>
+  <xacro:property name="right" value="$(arg chassis_right)"/>
+  <xacro:property name="body_height" value="$(arg chassis_height)"/>
+
+  <material name="body_blue"><color rgba="0.15 0.35 0.75 1"/></material>
+  <material name="wheel_black"><color rgba="0.05 0.05 0.05 1"/></material>
+  <material name="sensor_gray"><color rgba="0.4 0.4 0.4 1"/></material>
+
+  <link name="base_footprint"/>
+  <link name="base_link">
+    <visual>
+      <origin xyz="${(front-rear)/2} 0 ${body_height/2}"/>
+      <geometry><box size="${front+rear} ${left+right} ${body_height}"/></geometry>
+      <material name="body_blue"/>
+    </visual>
+  </link>
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_footprint"/><child link="base_link"/>
+    <origin xyz="0 0 ${r}"/>
+  </joint>
+
+  <xacro:macro name="drive_wheel" params="side y">
+    <link name="${side}_wheel_link">
+      <visual>
+        <origin rpy="${pi/2} 0 0"/>
+        <geometry><cylinder radius="${r}" length="0.03"/></geometry>
+        <material name="wheel_black"/>
+      </visual>
+    </link>
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="base_link"/><child link="${side}_wheel_link"/>
+      <origin xyz="0 ${y} 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+  <xacro:drive_wheel side="left" y="${w/2}"/>
+  <xacro:drive_wheel side="right" y="${-w/2}"/>
+
+  <link name="front_caster_link">
+    <visual><geometry><sphere radius="0.025"/></geometry><material name="wheel_black"/></visual>
+  </link>
+  <joint name="front_caster_joint" type="fixed">
+    <parent link="base_link"/><child link="front_caster_link"/>
+    <origin xyz="${front-0.04} 0 ${-r+0.025}"/>
+  </joint>
+
+  <link name="lidar_link">
+    <visual><geometry><cylinder radius="0.035" length="0.04"/></geometry><material name="sensor_gray"/></visual>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/><child link="lidar_link"/>
+    <origin xyz="$(arg lidar_x) $(arg lidar_y) $(arg lidar_z)" rpy="$(arg lidar_roll) $(arg lidar_pitch) $(arg lidar_yaw)"/>
+  </joint>
+
+  <link name="front_camera_link">
+    <visual><geometry><box size="0.08 0.025 0.025"/></geometry><material name="sensor_gray"/></visual>
+  </link>
+  <joint name="front_camera_joint" type="fixed">
+    <parent link="base_link"/><child link="front_camera_link"/>
+    <origin xyz="$(arg camera_x) $(arg camera_y) $(arg camera_z)" rpy="$(arg camera_roll) $(arg camera_pitch) $(arg camera_yaw)"/>
+  </joint>
+
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/>
+    <origin xyz="$(arg imu_x) $(arg imu_y) $(arg imu_z)" rpy="$(arg imu_roll) $(arg imu_pitch) $(arg imu_yaw)"/>
+  </joint>
+</robot>

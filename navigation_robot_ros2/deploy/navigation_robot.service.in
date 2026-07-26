@@ -1,0 +1,18 @@
+[Unit]
+Description=Navigation Robot ROS 2 bringup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=ROS_DOMAIN_ID=30
+Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+Environment=CYCLONEDDS_URI=file://@WORKSPACE@/install/navigation_robot_bringup/share/navigation_robot_bringup/config/cyclonedds.xml
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source @WORKSPACE@/install/setup.bash && exec ros2 launch navigation_robot_bringup robot.launch.py'
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

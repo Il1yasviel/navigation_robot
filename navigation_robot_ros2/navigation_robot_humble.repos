@@ -1,0 +1,9 @@
+repositories:
+  navigation2:
+    type: git
+    url: https://github.com/ros-navigation/navigation2.git
+    version: a097086719c88f781aa59788eca29ac6ca5e56db
+  slam_toolbox:
+    type: git
+    url: https://github.com/SteveMacenski/slam_toolbox.git
+    version: 8293d21fe5c816d0405e0cc1f3eb46c70659c267

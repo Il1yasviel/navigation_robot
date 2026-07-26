@@ -1,0 +1,64 @@
+# 日常配置入口。所有长度单位为米，角度单位为弧度。
+system:
+  operation_mode: sensors        # sensors / mapping / navigation
+  motion_enabled: false          # 完成实测与架空轮测试后才能改为 true
+  use_camera: false              # 相机型号确认前保持 false
+  use_rviz: false                # RViz 默认在远程电脑单独启动
+  log_level: info
+
+geometry:
+  # 待测。任一关键值为 0 时，mapping/navigation 会拒绝启动。
+  wheel_radius_m: 0.0
+  wheel_separation_m: 0.0
+  chassis_front_m: 0.0
+  chassis_rear_m: 0.0
+  chassis_left_m: 0.0
+  chassis_right_m: 0.0
+  chassis_height_m: 0.0
+  lidar_xyz: [0.0, 0.0, 0.0]
+  lidar_rpy: [0.0, 0.0, 0.0]
+  camera_xyz: [0.0, 0.0, 0.0]
+  camera_rpy: [0.0, 0.0, 0.0]
+  imu_xyz: [0.0, 0.0, 0.0]
+  imu_rpy: [0.0, 0.0, 0.0]
+
+base:
+  transport: serial             # serial / tcp；运行中不自动切换
+  serial_port: /dev/navigation_base
+  baud_rate: 115200
+  tcp_host: navigation-robot.local
+  tcp_port: 3333
+  max_rpm: 125.0
+  max_linear_velocity: 0.25
+  max_angular_velocity: 0.8
+  command_timeout_sec: 0.2
+  keepalive_period_sec: 0.1
+
+lidar:
+  port_name: /dev/navigation_lidar
+  baud_rate: 150000
+  frame_id: lidar_link
+  scan_topic: /scan
+  range_min: 0.05
+  range_max: 8.0
+  inverted: true
+  scan_size: 720
+
+camera:
+  # 识别实物后填写 orbbec 或 astra，并设置匹配的 launch_file。
+  driver: pending
+  launch_file: ""
+  camera_name: front_camera
+  enable_color: true
+  enable_depth: true
+  enable_point_cloud: false
+
+navigation:
+  map: ""                       # 例如 ~/.ros/navigation_robot/maps/office.yaml
+  nav2_params_file: ""          # 空值使用 navigation_robot_navigation 默认文件
+  slam_params_file: ""
+  ekf_params_file: ""
+
+network:
+  ros_domain_id: 30
+  rmw_implementation: rmw_cyclonedds_cpp
