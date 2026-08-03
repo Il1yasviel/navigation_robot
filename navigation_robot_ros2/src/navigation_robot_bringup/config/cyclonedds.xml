@@ -2,11 +2,22 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain id="any">
     <General>
-      <NetworkInterfaceAddress>auto</NetworkInterfaceAddress>
+      <Interfaces>
+        <NetworkInterface autodetermine="true"/>
+      </Interfaces>
       <AllowMulticast>true</AllowMulticast>
+      <!-- Keep each UDP datagram below a normal Wi-Fi/Ethernet MTU.  The
+           default MaxMessageSize may combine several DDS fragments into an
+           IP-fragmented datagram, which makes large samples such as /map
+           unreliable across Wi-Fi even while small /scan samples work. -->
+      <MaxMessageSize>1400B</MaxMessageSize>
+      <FragmentSize>1200B</FragmentSize>
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
+      <!-- The full mapping/navigation launch uses more than the old default
+           auto-index range because each ROS 2 process owns a DDS participant. -->
+      <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
     </Discovery>
   </Domain>
 </CycloneDDS>

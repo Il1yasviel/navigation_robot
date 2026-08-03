@@ -1,3 +1,4 @@
-# Replace 0000/0000 and add ATTRS{serial} after checking the ESP32/FTDI adapter.
-# The placeholder intentionally matches no normal adapter and is safe to install.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="0000", ATTRS{idProduct}=="0000", MODE="0660", GROUP="dialout", SYMLINK+="navigation_base"
+# FTDI FT232R connected to the ESP32-S3 UART0 host protocol.
+# Match the adapter serial as well as VID/PID so another FTDI device can never
+# be mistaken for the robot base controller.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="A5069RR4", MODE="0660", GROUP="dialout", SYMLINK+="navigation_base"

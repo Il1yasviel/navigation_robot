@@ -1,21 +1,23 @@
 # 日常配置入口。所有长度单位为米，角度单位为弧度。
 system:
   operation_mode: sensors        # sensors / mapping / navigation
-  motion_enabled: false          # 完成实测与架空轮测试后才能改为 true
+  motion_enabled: true          # 完成实测与架空轮测试后才能改为 true
   use_camera: false              # 相机型号确认前保持 false
   use_rviz: false                # RViz 默认在远程电脑单独启动
   log_level: info
 
 geometry:
-  # 待测。任一关键值为 0 时，mapping/navigation 会拒绝启动。
-  wheel_radius_m: 0.0
-  wheel_separation_m: 0.0
-  chassis_front_m: 0.0
-  chassis_rear_m: 0.0
-  chassis_left_m: 0.0
-  chassis_right_m: 0.0
-  chassis_height_m: 0.0
-  lidar_xyz: [0.0, 0.0, 0.0]
+  # 当前按 URDF 模型尺寸配置；完成实车标定后再用有效尺寸修正。
+  wheel_radius_m: 0.05
+  wheel_separation_m: 0.25
+  chassis_front_m: 0.20
+  chassis_rear_m: 0.10
+  chassis_left_m: 0.15
+  chassis_right_m: 0.15
+  chassis_height_m: 0.08
+  # lidar_link 位于扫描平面：离地 0.17 m，减去轮轴离地 0.05 m。
+  lidar_xyz: [0.0, 0.0, 0.12]
+  # 实物确认雷达 0° 红色 +X 轴与车体正前方一致。
   lidar_rpy: [0.0, 0.0, 0.0]
   camera_xyz: [0.0, 0.0, 0.0]
   camera_rpy: [0.0, 0.0, 0.0]
@@ -29,10 +31,17 @@ base:
   tcp_host: navigation-robot.local
   tcp_port: 3333
   max_rpm: 125.0
-  max_linear_velocity: 0.25
-  max_angular_velocity: 0.8
+  # 与原始上位机 125 RPM 档一致（R=0.05 m, W=0.25 m）。
+  max_linear_velocity: 0.6545
+  max_angular_velocity: 5.2360
   command_timeout_sec: 0.2
   keepalive_period_sec: 0.1
+  # 启动后保持机器人静止约 5 秒，标定陀螺零偏后才发布 /imu/data 并允许运动。
+  imu_gyro_bias_calibration_enabled: true
+  imu_gyro_bias_calibration_samples: 500
+  imu_gyro_stationary_threshold_rad_s: 0.05
+  imu_accel_norm_tolerance_m_s2: 1.5
+  imu_wheel_stationary_threshold_rpm: 1.0
 
 lidar:
   port_name: /dev/navigation_lidar
@@ -54,7 +63,7 @@ camera:
   enable_point_cloud: false
 
 navigation:
-  map: ""                       # 例如 ~/.ros/navigation_robot/maps/office.yaml
+  map: "/home/orangepi/.ros/navigation_robot/maps/home_01.yaml"
   nav2_params_file: ""          # 空值使用 navigation_robot_navigation 默认文件
   slam_params_file: ""
   ekf_params_file: ""

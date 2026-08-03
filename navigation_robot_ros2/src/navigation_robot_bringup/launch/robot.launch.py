@@ -167,6 +167,16 @@ def _launch_setup(context):
             'motion_enabled': mode != 'sensors' and _as_bool(system['motion_enabled']),
             'command_timeout_sec': float(base['command_timeout_sec']),
             'keepalive_period_sec': float(base['keepalive_period_sec']),
+            'imu_gyro_bias_calibration_enabled': _as_bool(
+                base['imu_gyro_bias_calibration_enabled']),
+            'imu_gyro_bias_calibration_samples': int(
+                base['imu_gyro_bias_calibration_samples']),
+            'imu_gyro_stationary_threshold_rad_s': float(
+                base['imu_gyro_stationary_threshold_rad_s']),
+            'imu_accel_norm_tolerance_m_s2': float(
+                base['imu_accel_norm_tolerance_m_s2']),
+            'imu_wheel_stationary_threshold_rpm': float(
+                base['imu_wheel_stationary_threshold_rpm']),
             'odom_frame_id': 'odom',
             'base_frame_id': 'base_footprint',
             'imu_frame_id': 'imu_link',

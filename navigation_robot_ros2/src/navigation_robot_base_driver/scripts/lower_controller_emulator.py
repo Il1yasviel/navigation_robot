@@ -73,6 +73,9 @@ def motor_record(motor_id, target, actual, count):
 def main():
     arguments = argparse.ArgumentParser()
     arguments.add_argument('--symlink', help='Optional stable link, e.g. /tmp/navigation_base')
+    arguments.add_argument('--gyro-bias-x', type=float, default=0.0)
+    arguments.add_argument('--gyro-bias-y', type=float, default=0.0)
+    arguments.add_argument('--gyro-bias-z', type=float, default=0.0)
     args = arguments.parse_args()
 
     master, slave = pty.openpty()
@@ -190,7 +193,9 @@ def main():
                 imu_count += 1
                 timestamp_us = int((now - started) * 1_000_000)
                 payload = struct.pack('<QB3x6fIHH', timestamp_us, 0x07,
-                                      0.0, 0.0, 9.80665, 0.0, 0.0, 0.0,
+                                      0.0, 0.0, 9.80665,
+                                      args.gyro_bias_x, args.gyro_bias_y,
+                                      args.gyro_bias_z,
                                       imu_count, 0, 0)
                 try_write(master, encode(0x93, output_sequence, payload))
                 output_sequence = (output_sequence + 1) & 0xFF

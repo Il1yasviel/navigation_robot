@@ -77,14 +77,19 @@ public:
     declare_parameter("wheel_radius_m", 0.0);
     declare_parameter("wheel_separation_m", 0.0);
     declare_parameter("max_rpm", 125.0);
-    declare_parameter("max_linear_velocity", 0.25);
-    declare_parameter("max_angular_velocity", 0.8);
+    declare_parameter("max_linear_velocity", 0.6545);
+    declare_parameter("max_angular_velocity", 5.2360);
     declare_parameter("motion_enabled", false);
     declare_parameter("command_timeout_sec", 0.2);
     declare_parameter("keepalive_period_sec", 0.1);
     declare_parameter("odom_frame_id", "odom");
     declare_parameter("base_frame_id", "base_footprint");
     declare_parameter("imu_frame_id", "imu_link");
+    declare_parameter("imu_gyro_bias_calibration_enabled", true);
+    declare_parameter("imu_gyro_bias_calibration_samples", 500);
+    declare_parameter("imu_gyro_stationary_threshold_rad_s", 0.05);
+    declare_parameter("imu_accel_norm_tolerance_m_s2", 1.5);
+    declare_parameter("imu_wheel_stationary_threshold_rpm", 1.0);
   }
 
   ~BaseDriverNode() override
@@ -118,6 +123,16 @@ public:
     odom_frame_id_ = get_parameter("odom_frame_id").as_string();
     base_frame_id_ = get_parameter("base_frame_id").as_string();
     imu_frame_id_ = get_parameter("imu_frame_id").as_string();
+    imu_gyro_bias_calibration_enabled_ =
+      get_parameter("imu_gyro_bias_calibration_enabled").as_bool();
+    imu_gyro_bias_calibration_samples_ =
+      get_parameter("imu_gyro_bias_calibration_samples").as_int();
+    imu_gyro_stationary_threshold_rad_s_ =
+      get_parameter("imu_gyro_stationary_threshold_rad_s").as_double();
+    imu_accel_norm_tolerance_m_s2_ =
+      get_parameter("imu_accel_norm_tolerance_m_s2").as_double();
+    imu_wheel_stationary_threshold_rpm_ =
+      get_parameter("imu_wheel_stationary_threshold_rpm").as_double();
 
     if (transport_type_ != "serial" && transport_type_ != "tcp") {
       RCLCPP_ERROR(get_logger(), "transport must be 'serial' or 'tcp'");
@@ -127,10 +142,23 @@ public:
       RCLCPP_ERROR(get_logger(), "ESP32 host protocol requires 115200 baud");
       return CallbackReturn::FAILURE;
     }
+    if (imu_gyro_bias_calibration_samples_ < 50 ||
+      !std::isfinite(imu_gyro_stationary_threshold_rad_s_) ||
+      !std::isfinite(imu_accel_norm_tolerance_m_s2_) ||
+      !std::isfinite(imu_wheel_stationary_threshold_rpm_) ||
+      imu_gyro_stationary_threshold_rad_s_ <= 0.0 ||
+      imu_accel_norm_tolerance_m_s2_ <= 0.0 ||
+      imu_wheel_stationary_threshold_rpm_ < 0.0)
+    {
+      RCLCPP_ERROR(get_logger(), "invalid IMU gyro bias calibration parameters");
+      return CallbackReturn::FAILURE;
+    }
 
     wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/wheel/odometry", 20);
     imu_pub_ = create_publisher<sensor_msgs::msg::Imu>(
       "/imu/data_raw", rclcpp::SensorDataQoS());
+    imu_corrected_pub_ = create_publisher<sensor_msgs::msg::Imu>(
+      "/imu/data", rclcpp::SensorDataQoS());
     joint_pub_ = create_publisher<sensor_msgs::msg::JointState>("/joint_states", 20);
     diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>(
       "/diagnostics", 10);
@@ -153,6 +181,7 @@ public:
   {
     wheel_odom_pub_->on_activate();
     imu_pub_->on_activate();
+    imu_corrected_pub_->on_activate();
     joint_pub_->on_activate();
     diagnostics_pub_->on_activate();
     active_.store(true);
@@ -165,6 +194,12 @@ public:
     }
     if (!motion_enabled_) {
       RCLCPP_INFO(get_logger(), "motion_enabled=false: sensor-only safety lock is active");
+    }
+    if (imu_gyro_bias_calibration_enabled_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "keep robot stationary: collecting %ld samples for IMU gyro bias calibration",
+        static_cast<long>(imu_gyro_bias_calibration_samples_));
     }
     return CallbackReturn::SUCCESS;
   }
@@ -180,6 +215,7 @@ public:
     }
     wheel_odom_pub_->on_deactivate();
     imu_pub_->on_deactivate();
+    imu_corrected_pub_->on_deactivate();
     joint_pub_->on_deactivate();
     diagnostics_pub_->on_deactivate();
     return CallbackReturn::SUCCESS;
@@ -194,6 +230,7 @@ public:
     diagnostics_timer_.reset();
     wheel_odom_pub_.reset();
     imu_pub_.reset();
+    imu_corrected_pub_.reset();
     joint_pub_.reset();
     diagnostics_pub_.reset();
     return CallbackReturn::SUCCESS;
@@ -211,17 +248,97 @@ private:
     std::chrono::steady_clock::time_point sent_at;
   };
 
+  void clear_imu_bias_candidate()
+  {
+    imu_gyro_sum_x_ = 0.0;
+    imu_gyro_sum_y_ = 0.0;
+    imu_gyro_sum_z_ = 0.0;
+    imu_gyro_bias_sample_count_.store(0);
+  }
+
+  void reset_imu_bias_calibration()
+  {
+    clear_imu_bias_candidate();
+    imu_gyro_bias_x_.store(0.0);
+    imu_gyro_bias_y_.store(0.0);
+    imu_gyro_bias_z_.store(0.0);
+    imu_gyro_bias_calibrated_.store(!imu_gyro_bias_calibration_enabled_);
+  }
+
+  bool update_imu_bias_calibration(
+    double accel_x, double accel_y, double accel_z,
+    double gyro_x, double gyro_y, double gyro_z)
+  {
+    if (imu_gyro_bias_calibrated_.load()) {
+      return true;
+    }
+
+    const int64_t chassis_age_ns = steady_time_ns() - last_chassis_time_ns_.load();
+    const double accel_norm = std::sqrt(
+      accel_x * accel_x + accel_y * accel_y + accel_z * accel_z);
+    const double gyro_norm = std::sqrt(
+      gyro_x * gyro_x + gyro_y * gyro_y + gyro_z * gyro_z);
+    const bool chassis_fresh = last_chassis_time_ns_.load() != 0 &&
+      chassis_age_ns >= 0 && chassis_age_ns < 500000000LL;
+    const bool feedback_fresh = left_feedback_age_ms_.load() <= kFeedbackOfflineMs &&
+      right_feedback_age_ms_.load() <= kFeedbackOfflineMs;
+    const bool wheels_stationary =
+      std::abs(left_feedback_rpm_.load()) <= imu_wheel_stationary_threshold_rpm_ &&
+      std::abs(right_feedback_rpm_.load()) <= imu_wheel_stationary_threshold_rpm_;
+    const bool accel_stationary = std::isfinite(accel_norm) &&
+      std::abs(accel_norm - 9.80665) <= imu_accel_norm_tolerance_m_s2_;
+    const bool gyro_stationary = std::isfinite(gyro_norm) &&
+      gyro_norm <= imu_gyro_stationary_threshold_rad_s_;
+
+    if (!chassis_fresh || !feedback_fresh || !wheels_stationary ||
+      !accel_stationary || !gyro_stationary)
+    {
+      if (imu_gyro_bias_sample_count_.load() > 0) {
+        clear_imu_bias_candidate();
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "IMU gyro bias calibration restarted because the robot was not stationary");
+      }
+      return false;
+    }
+
+    imu_gyro_sum_x_ += gyro_x;
+    imu_gyro_sum_y_ += gyro_y;
+    imu_gyro_sum_z_ += gyro_z;
+    const int64_t sample_count = imu_gyro_bias_sample_count_.fetch_add(1) + 1;
+    if (sample_count < imu_gyro_bias_calibration_samples_) {
+      return false;
+    }
+
+    const double divisor = static_cast<double>(sample_count);
+    imu_gyro_bias_x_.store(imu_gyro_sum_x_ / divisor);
+    imu_gyro_bias_y_.store(imu_gyro_sum_y_ / divisor);
+    imu_gyro_bias_z_.store(imu_gyro_sum_z_ / divisor);
+    imu_gyro_bias_calibrated_.store(true);
+    RCLCPP_INFO(
+      get_logger(), "IMU gyro bias calibrated: x=%+.8f y=%+.8f z=%+.8f rad/s (%ld samples)",
+      imu_gyro_bias_x_.load(), imu_gyro_bias_y_.load(), imu_gyro_bias_z_.load(),
+      static_cast<long>(sample_count));
+    return true;
+  }
+
   void reset_runtime_state()
   {
     parser_.reset();
     link_state_.store(LinkState::kDisconnected);
     connected_.store(false);
     control_active_.store(false);
+    last_command_active_.store(false);
     sequence_.store(0);
+    target_left_rpm_ = 0;
+    target_right_rpm_ = 0;
+    command_dirty_ = false;
     last_cmd_time_ = std::chrono::steady_clock::time_point{};
     last_keepalive_time_ = std::chrono::steady_clock::time_point{};
     last_chassis_time_ns_.store(0);
     last_imu_time_ns_.store(0);
+    left_feedback_rpm_.store(0.0);
+    right_feedback_rpm_.store(0.0);
     x_ = 0.0;
     y_ = 0.0;
     yaw_ = 0.0;
@@ -229,6 +346,7 @@ private:
     right_joint_position_ = 0.0;
     last_mcu_uptime_ms_ = 0;
     imu_time_initialized_ = false;
+    reset_imu_bias_calibration();
   }
 
   bool geometry_valid() const
@@ -319,6 +437,7 @@ private:
     }
     connected_.store(false);
     control_active_.store(false);
+    last_command_active_.store(false);
     link_state_.store(LinkState::kDisconnected);
     std::lock_guard<std::mutex> pending_lock(pending_mutex_);
     pending_acks_.clear();
@@ -355,12 +474,18 @@ private:
     const uint8_t sequence = sequence_.fetch_add(1);
     Frame frame{type, sequence, ack_required ? kAckRequired : static_cast<uint8_t>(0), payload};
     const auto bytes = encode_frame(frame);
-    if (bytes.empty() || !write_bytes(bytes)) {
-      return sequence;
-    }
     if (ack_required) {
+      // Register before writing: the serial worker can receive a fast ACK
+      // immediately after write(), before this caller is scheduled again.
       std::lock_guard<std::mutex> lock(pending_mutex_);
       pending_acks_[sequence] = PendingAck{type, std::chrono::steady_clock::now()};
+    }
+    if (bytes.empty() || !write_bytes(bytes)) {
+      if (ack_required) {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending_acks_.erase(sequence);
+      }
+      return sequence;
     }
     return sequence;
   }
@@ -498,6 +623,7 @@ private:
       RCLCPP_WARN(get_logger(), "request 0x%02x rejected with status %u", request_type, status);
       if (request_type == static_cast<uint8_t>(MessageType::kSetDualRpm)) {
         control_active_.store(false);
+        last_command_active_.store(false);
       }
       // The firmware rejects SET_MODE (precondition) until the motor has been
       // selected and confirmed by a fresh query; step back to the query phase
@@ -546,7 +672,9 @@ private:
 
   void cmd_vel_callback(const geometry_msgs::msg::Twist::SharedPtr msg)
   {
-    if (!active_.load() || !motion_enabled_ || !geometry_valid()) {
+    if (!active_.load() || !motion_enabled_ || !geometry_valid() ||
+      !imu_gyro_bias_calibrated_.load())
+    {
       return;
     }
     if (!std::isfinite(msg->linear.x) || !std::isfinite(msg->angular.z)) {
@@ -563,11 +691,20 @@ private:
       std::abs(right_rpm) / max_rpm_});
     left_rpm /= scale;
     right_rpm /= scale;
+    const int16_t new_left_rpm = static_cast<int16_t>(std::lround(left_rpm));
+    const int16_t new_right_rpm = static_cast<int16_t>(std::lround(right_rpm));
     {
       std::lock_guard<std::mutex> lock(command_mutex_);
-      target_left_rpm_ = static_cast<int16_t>(std::lround(left_rpm));
-      target_right_rpm_ = static_cast<int16_t>(std::lround(right_rpm));
-      command_dirty_ = true;
+      const bool target_changed =
+        new_left_rpm != target_left_rpm_ || new_right_rpm != target_right_rpm_;
+      const bool moving_target = new_left_rpm != 0 || new_right_rpm != 0;
+      const bool needs_control_retry = moving_target &&
+        !control_active_.load() && !last_command_active_.load();
+      target_left_rpm_ = new_left_rpm;
+      target_right_rpm_ = new_right_rpm;
+      if (target_changed || needs_control_retry) {
+        command_dirty_ = true;
+      }
       last_cmd_time_ = std::chrono::steady_clock::now();
     }
   }
@@ -628,6 +765,7 @@ private:
       static_cast<uint8_t>(MessageType::kStopDual),
       {kLeftMotorId, kRightMotorId, 0xFF}, true);
     control_active_.store(false);
+    last_command_active_.store(false);
   }
 
   void best_effort_stop()
@@ -683,6 +821,8 @@ private:
     }
     const double left_rpm = read_i16_le(payload.data() + 14);
     const double right_rpm = read_i16_le(payload.data() + 38);
+    left_feedback_rpm_.store(left_rpm);
+    right_feedback_rpm_.store(right_rpm);
     const double left_rad_s = left_rpm * kTwoPi / 60.0;
     const double right_rad_s = right_rpm * kTwoPi / 60.0;
 
@@ -778,6 +918,19 @@ private:
     msg.angular_velocity_covariance[4] = 0.02;
     msg.angular_velocity_covariance[8] = 0.02;
     imu_pub_->publish(msg);
+
+    if (!update_imu_bias_calibration(
+        msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z,
+        msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z))
+    {
+      return;
+    }
+
+    sensor_msgs::msg::Imu corrected = msg;
+    corrected.angular_velocity.x -= imu_gyro_bias_x_.load();
+    corrected.angular_velocity.y -= imu_gyro_bias_y_.load();
+    corrected.angular_velocity.z -= imu_gyro_bias_z_.load();
+    imu_corrected_pub_->publish(corrected);
   }
 
   void publish_diagnostics()
@@ -800,6 +953,9 @@ private:
     } else if (link_state_.load() != LinkState::kReady || !chassis_fresh) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       status.message = "link not ready or chassis telemetry stale";
+    } else if (!imu_gyro_bias_calibrated_.load()) {
+      status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
+      status.message = "imu gyro calibration in progress; keep robot stationary";
     } else if (!geometry_valid() || !motion_enabled_) {
       status.level = diagnostic_msgs::msg::DiagnosticStatus::WARN;
       status.message = "sensor-only motion lock";
@@ -814,6 +970,11 @@ private:
       kv("control_owner", std::to_string(owner_.load())),
       kv("chassis_flags", std::to_string(chassis_flags_.load())),
       kv("imu_flags", std::to_string(imu_flags_.load())),
+      kv("imu_gyro_bias_calibrated", imu_gyro_bias_calibrated_.load() ? "true" : "false"),
+      kv("imu_gyro_bias_samples", std::to_string(imu_gyro_bias_sample_count_.load())),
+      kv("imu_gyro_bias_x_rad_s", std::to_string(imu_gyro_bias_x_.load())),
+      kv("imu_gyro_bias_y_rad_s", std::to_string(imu_gyro_bias_y_.load())),
+      kv("imu_gyro_bias_z_rad_s", std::to_string(imu_gyro_bias_z_.load())),
       kv("left_feedback_age_ms", std::to_string(left_feedback_age_ms_.load())),
       kv("right_feedback_age_ms", std::to_string(right_feedback_age_ms_.load())),
       kv("watchdog_stops", std::to_string(watchdog_stops_.load())),
@@ -842,9 +1003,14 @@ private:
   double wheel_radius_m_{0.0};
   double wheel_separation_m_{0.0};
   double max_rpm_{125.0};
-  double max_linear_velocity_{0.25};
-  double max_angular_velocity_{0.8};
+  double max_linear_velocity_{0.6545};
+  double max_angular_velocity_{5.2360};
   bool motion_enabled_{false};
+  bool imu_gyro_bias_calibration_enabled_{true};
+  int64_t imu_gyro_bias_calibration_samples_{500};
+  double imu_gyro_stationary_threshold_rad_s_{0.05};
+  double imu_accel_norm_tolerance_m_s2_{1.5};
+  double imu_wheel_stationary_threshold_rpm_{1.0};
   std::chrono::duration<double> command_timeout_{0.2};
   std::chrono::duration<double> keepalive_period_{0.1};
   std::string odom_frame_id_;
@@ -853,6 +1019,7 @@ private:
 
   rclcpp_lifecycle::LifecyclePublisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+  rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::Imu>::SharedPtr imu_corrected_pub_;
   rclcpp_lifecycle::LifecyclePublisher<sensor_msgs::msg::JointState>::SharedPtr joint_pub_;
   rclcpp_lifecycle::LifecyclePublisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr
     diagnostics_pub_;
@@ -887,6 +1054,8 @@ private:
   std::chrono::steady_clock::time_point last_keepalive_time_;
   std::atomic<int64_t> last_chassis_time_ns_{0};
   std::atomic<int64_t> last_imu_time_ns_{0};
+  std::atomic<double> left_feedback_rpm_{0.0};
+  std::atomic<double> right_feedback_rpm_{0.0};
 
   double x_{0.0};
   double y_{0.0};
@@ -900,6 +1069,14 @@ private:
   std::atomic<uint8_t> owner_{0};
   std::atomic<uint8_t> chassis_flags_{0};
   std::atomic<uint8_t> imu_flags_{0};
+  std::atomic<bool> imu_gyro_bias_calibrated_{false};
+  std::atomic<int64_t> imu_gyro_bias_sample_count_{0};
+  std::atomic<double> imu_gyro_bias_x_{0.0};
+  std::atomic<double> imu_gyro_bias_y_{0.0};
+  std::atomic<double> imu_gyro_bias_z_{0.0};
+  double imu_gyro_sum_x_{0.0};
+  double imu_gyro_sum_y_{0.0};
+  double imu_gyro_sum_z_{0.0};
   std::atomic<uint16_t> watchdog_stops_{0};
   std::atomic<uint16_t> left_feedback_age_ms_{0};
   std::atomic<uint16_t> right_feedback_age_ms_{0};

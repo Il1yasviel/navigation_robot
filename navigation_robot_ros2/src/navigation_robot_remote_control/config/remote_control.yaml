@@ -1,0 +1,14 @@
+navigation_robot_keyboard_teleop:
+  ros__parameters:
+    # 建图手动遥控直达香橙派 base_driver，不经过 mux/Collision Monitor。
+    command_topic: /cmd_vel
+    diagnostics_topic: /diagnostics
+    # 1～5 档对应原始上位机 25/50/75/100/125 RPM。
+    max_linear_speed: 0.6545
+    max_angular_speed: 5.2360
+    initial_gear: 1
+    publish_rate_hz: 20.0
+    # 0 表示方向命令锁存，直到新方向、空格或 Q；DDS 断线仍由底盘超时停车。
+    key_timeout_sec: 0.0
+    diagnostic_timeout_sec: 2.5
+    require_base_ready: false

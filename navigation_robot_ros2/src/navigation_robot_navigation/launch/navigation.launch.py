@@ -33,15 +33,14 @@ def generate_launch_description():
             launch_arguments={
                 'map': map_yaml,
                 'params_file': params,
-                'use_sim_time': 'false',
-                'autostart': 'true',
-                'use_composition': 'false',
-                'use_respawn': 'true',
+                # Nav2 Humble evaluates use_composition with PythonExpression.
+                # It therefore requires Python-style booleans (False/True), not
+                # the lower-case YAML spellings.
+                'use_sim_time': 'False',
+                'autostart': 'True',
+                'use_composition': 'False',
+                'use_respawn': 'True',
             }.items(),
-        ),
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(package_dir, 'launch', 'command_safety.launch.py')),
         ),
         Node(
             package='nav2_controller', executable='controller_server',
@@ -70,7 +69,7 @@ def generate_launch_description():
             name='velocity_smoother', parameters=[params], output='screen',
             remappings=[
                 ('cmd_vel', '/cmd_vel_nav_raw'),
-                ('cmd_vel_smoothed', '/cmd_vel_nav'),
+                ('cmd_vel_smoothed', '/cmd_vel'),
             ],
         ),
         Node(

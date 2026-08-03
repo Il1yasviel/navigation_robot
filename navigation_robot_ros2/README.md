@@ -12,6 +12,8 @@ ROS 包维护者使用 `air <air@localhost.local>`；ROS 元数据校验不接�
 - 已重构 150000 波特率二维雷达驱动，默认设备 `/dev/navigation_lidar`。
 - 已纳入 Navigation2 1.1.20 和 SLAM Toolbox 2.6.10 完整源码。
 - 已配置 EKF、SLAM Toolbox、DWB、速度平滑、twist_mux 和 Collision Monitor。
+- 已提供 `navigation_robot_remote_control`，可从 Ubuntu 电脑经 ROS 2 DDS 无线
+  发布 `/cmd_vel_teleop`，并保留底盘诊断门控、Collision Monitor 与多级超时停车。
 - 相机型号和所有机械尺寸待测，因此相机默认关闭、`motion_enabled` 默认关闭。
 
 ## 构建
@@ -53,7 +55,8 @@ ros2 launch navigation_robot_bringup robot.launch.py operation_mode:=navigation
 远程键盘建图：
 
 ```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/cmd_vel_teleop
+ros2 run navigation_robot_remote_control keyboard_teleop --ros-args --params-file \
+  "$(ros2 pkg prefix --share navigation_robot_remote_control)/config/remote_control.yaml"
 ```
 
 显式保存地图，不覆盖同名文件：
@@ -81,6 +84,15 @@ python3 src/navigation_robot_base_driver/scripts/lower_controller_emulator.py \
 
 然后将总配置中的串口改成 `/tmp/navigation_base`，启动传感器模式检查
 `/wheel/odometry`、`/imu/data_raw` 和 `/diagnostics`。
+
+真实底盘接入后可在香橙派终端执行无运动安全检测：
+
+```bash
+./scripts/check_real_base.sh
+```
+
+脚本固定使用 `motion_enabled=false` 和零几何参数，只发送协议握手、查询、速度模式
+准备和最终停车命令，同时读取左右轮反馈、IMU 与诊断；它不发送运动 RPM。
 
 ## 部署注意事项
 

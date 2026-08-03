@@ -9,4 +9,3 @@ twist_mux:
         topic: /cmd_vel_teleop
         timeout: 0.3
         priority: 100
-    locks: {}

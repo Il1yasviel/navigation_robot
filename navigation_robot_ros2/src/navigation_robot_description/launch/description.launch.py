@@ -16,7 +16,7 @@ ARGUMENTS = {
     'chassis_left': '0.15',
     'chassis_right': '0.15',
     'chassis_height': '0.08',
-    'lidar_x': '0', 'lidar_y': '0', 'lidar_z': '0',
+    'lidar_x': '0', 'lidar_y': '0', 'lidar_z': '0.12',
     'lidar_roll': '0', 'lidar_pitch': '0', 'lidar_yaw': '0',
     'camera_x': '0', 'camera_y': '0', 'camera_z': '0',
     'camera_roll': '0', 'camera_pitch': '0', 'camera_yaw': '0',

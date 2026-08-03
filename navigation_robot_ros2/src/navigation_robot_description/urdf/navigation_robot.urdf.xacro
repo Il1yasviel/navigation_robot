@@ -7,7 +7,7 @@
   <xacro:arg name="chassis_left" default="0.15"/>
   <xacro:arg name="chassis_right" default="0.15"/>
   <xacro:arg name="chassis_height" default="0.08"/>
-  <xacro:arg name="lidar_x" default="0"/><xacro:arg name="lidar_y" default="0"/><xacro:arg name="lidar_z" default="0"/>
+  <xacro:arg name="lidar_x" default="0"/><xacro:arg name="lidar_y" default="0"/><xacro:arg name="lidar_z" default="0.12"/>
   <xacro:arg name="lidar_roll" default="0"/><xacro:arg name="lidar_pitch" default="0"/><xacro:arg name="lidar_yaw" default="0"/>
   <xacro:arg name="camera_x" default="0"/><xacro:arg name="camera_y" default="0"/><xacro:arg name="camera_z" default="0"/>
   <xacro:arg name="camera_roll" default="0"/><xacro:arg name="camera_pitch" default="0"/><xacro:arg name="camera_yaw" default="0"/>
@@ -65,7 +65,12 @@
   </joint>
 
   <link name="lidar_link">
-    <visual><geometry><cylinder radius="0.035" length="0.04"/></geometry><material name="sensor_gray"/></visual>
+    <visual>
+      <!-- lidar_link is the scan plane; the housing bottom is 0.03 m below it. -->
+      <origin xyz="0 0 -0.01"/>
+      <geometry><cylinder radius="0.035" length="0.04"/></geometry>
+      <material name="sensor_gray"/>
+    </visual>
   </link>
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/><child link="lidar_link"/>
